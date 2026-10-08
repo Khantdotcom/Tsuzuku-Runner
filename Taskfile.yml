@@ -1,0 +1,57 @@
+version: "3"
+
+dotenv: [".env"]
+
+vars:
+  BIN_DIR: bin
+  EXE: '{{if eq OS "windows"}}.exe{{end}}'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build server and worker binaries into ./bin
+    cmds:
+      - go build -o {{.BIN_DIR}}/server{{.EXE}} ./cmd/server
+      - go build -o {{.BIN_DIR}}/worker{{.EXE}} ./cmd/worker
+
+  run:server:
+    desc: Run the API server
+    cmds:
+      - go run ./cmd/server
+
+  run:worker:
+    desc: Run a worker
+    cmds:
+      - go run ./cmd/worker
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test ./...
+
+  test:race:
+    desc: Run unit tests with the race detector (requires cgo)
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - go test -race ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run
+
+  fmt:
+    desc: Format Go code with golangci-lint formatters
+    cmds:
+      - golangci-lint fmt
+
+  tidy:
+    desc: Tidy go.mod and go.sum
+    cmds:
+      - go mod tidy
