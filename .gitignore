@@ -24,6 +24,10 @@ profile.cov
 # Build output
 bin/
 
+# Frontend dependencies and build output
+node_modules/
+.next/
+
 # Go workspace file
 go.work
 go.work.sum

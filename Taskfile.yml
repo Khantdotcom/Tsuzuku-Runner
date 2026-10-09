@@ -31,6 +31,46 @@ tasks:
     cmds:
       - go run ./cmd/worker
 
+  up:
+    desc: Build and start the full stack (Postgres, migrations, server, two workers, dashboard)
+    cmds:
+      - docker compose up --build -d
+
+  down:
+    desc: Stop and remove the stack containers (database volume is kept)
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: "Follow stack logs (usage: task logs -- server worker-01)"
+    cmds:
+      - docker compose logs -f {{.CLI_ARGS}}
+
+  fe:install:
+    desc: Install dashboard dependencies
+    cmds:
+      - pnpm --dir frontend install
+
+  fe:dev:
+    desc: Run the dashboard with hot reload on http://localhost:3000 (proxies to TSUZUKU_API_URL)
+    cmds:
+      - pnpm --dir frontend dev
+
+  fe:lint:
+    desc: Lint the dashboard
+    cmds:
+      - pnpm --dir frontend lint
+
+  fe:typecheck:
+    desc: Type-check the dashboard
+    cmds:
+      - pnpm --dir frontend typecheck
+
+  fe:build:
+    desc: Build the dashboard for production
+    cmds:
+      - pnpm --dir frontend build
+
   db:up:
     desc: Start the development PostgreSQL container and wait until it is healthy
     cmds:
