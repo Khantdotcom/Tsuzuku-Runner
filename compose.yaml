@@ -62,7 +62,7 @@ services:
       TSUZUKU_DATABASE_URL: *database-url
       TSUZUKU_WORKER_TOKEN: ${TSUZUKU_WORKER_TOKEN:-dev-worker-token}
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${TSUZUKU_API_HOST_PORT:-8080}:8080"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -94,7 +94,7 @@ services:
     environment:
       TSUZUKU_API_URL: http://server:8080
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${TSUZUKU_UI_HOST_PORT:-3000}:3000"
     depends_on:
       server:
         condition: service_started
