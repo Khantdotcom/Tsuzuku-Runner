@@ -73,6 +73,7 @@ erDiagram
 | 00004     | `verification_checks` | Individual checks within a run and their result.                                          |
 | 00004     | `failures`            | Classified failures (category plus message and details).                                  |
 | 00004     | `deliveries`          | Outbound results (patch, pull request, ...) with an idempotency key.                      |
+| 00005     | `workers` (columns)   | Host CPU and memory usage from the latest heartbeat; `NULL` until the first heartbeat.    |
 
 ## Conventions
 

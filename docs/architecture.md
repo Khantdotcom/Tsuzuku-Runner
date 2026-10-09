@@ -50,6 +50,41 @@ Domain packages live under `internal/`, one package per bounded area (`api`, `jo
 - Logging uses `log/slog`: human-readable text in development, JSON in every other environment. Every record carries a `service` attribute (`server` or `worker`).
 - Both processes shut down gracefully on `SIGINT`/`SIGTERM`.
 
+## HTTP API
+
+Errors use RFC 9457 problem details (`application/problem+json`).
+
+| Endpoint                              | Auth         | Purpose                                                    |
+| ------------------------------------- | ------------ | ---------------------------------------------------------- |
+| `GET /healthz`                        | none         | Liveness: the process is up                                |
+| `GET /readyz`                         | none         | Readiness: the database answers a ping within 2s           |
+| `POST /api/v1/workers/register`       | worker token | Register or re-register a worker; returns its ID           |
+| `POST /api/v1/workers/{id}/heartbeat` | worker token | Report liveness and host usage; `404` if the ID is unknown |
+| `GET /api/v1/workers`                 | none         | List workers with capacity, usage, and online status       |
+
+Workers authenticate with a shared bearer token (`TSUZUKU_WORKER_TOKEN`), compared in constant time. Request and response types for the worker endpoints live in `internal/workerapi`, which both binaries import.
+
+## Worker lifecycle
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant A as API server
+    participant DB as PostgreSQL
+    W->>A: POST /workers/register (name, slots, capacity)
+    A->>DB: upsert by name
+    A-->>W: worker ID
+    loop every heartbeat interval
+        W->>A: POST /workers/{id}/heartbeat (cpu %, memory)
+        A->>DB: update last_heartbeat_at, usage
+    end
+    Note over W,A: 404 on heartbeat: worker registers again
+```
+
+- **Registration is an upsert by name.** A restarted worker keeps its ID and registration time; capacity and metadata are refreshed. Registration retries with exponential backoff (1s to 30s) until the API is reachable.
+- **Liveness is derived, not stored.** A worker is `online` when its last heartbeat is no older than `TSUZUKU_WORKER_STALE_AFTER` (15s default, three missed 5s heartbeats). The comparison uses the database clock for both sides, so clock skew between hosts cannot flip the status.
+- **Host usage** (CPU percent, used memory) comes from the latest heartbeat. If sampling fails, the worker still sends a heartbeat with the previous sample, because liveness matters more than fresh numbers.
+
 ## Data model
 
 PostgreSQL holds workloads, jobs, their full transition history, attempts, leases, logs, verification results, failures, and deliveries. Access goes through `internal/store`: a `pgxpool` connection pool, a `WithTx` transaction helper, and sqlc-generated queries ([ADR 0002](adr/0002-postgres-access-pgx-sqlc-goose.md)). Only `server`, `migrate`, and `seed` read `TSUZUKU_DATABASE_URL`.

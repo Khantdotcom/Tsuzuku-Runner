@@ -38,14 +38,17 @@ Observability: OpenTelemetry, Prometheus, Grafana
 ### Quickstart
 
 ```bash
-cp .env.example .env   # sets TSUZUKU_DATABASE_URL for the local database
+cp .env.example .env   # database URL and a development worker token
 task db:up             # PostgreSQL 17 on localhost:5433
 task migrate:up        # create the schema
 task seed              # optional: example job history
 task run:server        # API on http://localhost:8080
-task run:worker        # in a second terminal
-curl http://localhost:8080/healthz
+task run:worker        # in a second terminal; registers and sends heartbeats
+curl http://localhost:8080/readyz
+curl http://localhost:8080/api/v1/workers
 ```
+
+The server needs the database to start. Stop the worker and it shows as `offline` after `TSUZUKU_WORKER_STALE_AFTER` (15s by default).
 
 ### Common tasks
 
