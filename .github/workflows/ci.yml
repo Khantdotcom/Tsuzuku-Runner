@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOLANGCI_LINT_VERSION: v2.14.0
+  # Keep in sync with SQLC_IMAGE in Taskfile.yml.
+  SQLC_IMAGE: sqlc/sqlc:1.31.1
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
+
+      - name: Vet
+        run: go vet -tags integration ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+
+      # Integration tests start their own PostgreSQL containers with Testcontainers.
+      - name: Test (unit and integration, race detector)
+        run: go test -race -count=1 -tags integration ./...
+
+  sqlc:
+    name: Generated code
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check sqlc output is up to date
+        run: docker run --rm -v "$PWD:/src" -w /src "$SQLC_IMAGE" diff
+
+  frontend:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: frontend/package.json
+          cache: true
+          cache_dependency_path: frontend/pnpm-lock.yaml
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+
+  stack:
+    name: Compose smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build and start the stack
+        run: docker compose up --build --detach
+
+      - name: Wait for the API and both workers
+        env:
+          API_URL: http://127.0.0.1:8080
+          DASHBOARD_URL: http://127.0.0.1:3000
+        run: |
+          online=0
+          for _ in $(seq 1 60); do
+            body=$(curl -fsS "$DASHBOARD_URL/api/v1/workers" 2>/dev/null) || body='{"workers":[]}'
+            online=$(jq '[.workers[] | select(.status == "online")] | length' <<<"$body")
+            if [ "$online" -ge 2 ]; then
+              break
+            fi
+            sleep 2
+          done
+          echo "workers online: $online"
+          [ "$online" -ge 2 ] || { echo "::error::expected 2 workers online, got $online"; exit 1; }
+          curl -fsS "$API_URL/readyz"
+          curl -fsS "$DASHBOARD_URL/api/readyz"
+          curl -fsS -o /dev/null "$DASHBOARD_URL/"
+          echo "stack is healthy"
+
+      - name: Show service status and logs
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes
