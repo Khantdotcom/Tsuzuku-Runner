@@ -42,6 +42,8 @@ The codebase is a modular monolith ([ADR 0001](adr/0001-modular-monolith.md)) wi
 | `migrate` | `cmd/migrate` | Apply, roll back, or inspect schema migrations |
 | `seed`    | `cmd/seed`    | Load example job history for development       |
 
+The dashboard is a separate Next.js app in `frontend/`.
+
 Domain packages live under `internal/`, one package per bounded area (`api`, `job`, `scheduler`, `worker`, `runtime`, `verification`, `evidence`, ...). Packages are added as they gain real code.
 
 ## Configuration and logging
@@ -84,6 +86,40 @@ sequenceDiagram
 - **Registration is an upsert by name.** A restarted worker keeps its ID and registration time; capacity and metadata are refreshed. Registration retries with exponential backoff (1s to 30s) until the API is reachable.
 - **Liveness is derived, not stored.** A worker is `online` when its last heartbeat is no older than `TSUZUKU_WORKER_STALE_AFTER` (15s default, three missed 5s heartbeats). The comparison uses the database clock for both sides, so clock skew between hosts cannot flip the status.
 - **Host usage** (CPU percent, used memory) comes from the latest heartbeat. If sampling fails, the worker still sends a heartbeat with the previous sample, because liveness matters more than fresh numbers.
+
+## Dashboard
+
+The dashboard (`frontend/`, Next.js) shows API liveness, database readiness, and the worker fleet, polling every 5 seconds.
+
+The browser only talks to the dashboard's own origin. A route handler at `/api/[...path]` forwards an allowlisted set of `GET` paths (`/api/healthz`, `/api/readyz`, `/api/v1/*`) to the API at `TSUZUKU_API_URL`, read at request time. As a result:
+
+- the Go API needs no CORS configuration;
+- one dashboard image works in any environment, because the API address is not baked in at build time;
+- an unreachable API turns into a `502` problem response instead of a browser network error.
+
+## Local deployment
+
+`compose.yaml` runs the whole system for development:
+
+```mermaid
+flowchart LR
+    B[Browser] -->|:3000| FE[frontend]
+    FE -->|/api proxy| S[server :8080]
+    W1[worker-01] -->|HTTP + token| S
+    W2[worker-02] -->|HTTP + token| S
+    M[migrate] -->|goose up| DB[(postgres)]
+    S --> DB
+```
+
+| Service                  | Image target            | Notes                                                                 |
+| ------------------------ | ----------------------- | --------------------------------------------------------------------- |
+| `postgres`               | `postgres:17-alpine`    | Published on `127.0.0.1:5433`                                         |
+| `migrate`                | `Dockerfile` → `migrate` | One-shot `migrate up`; runs after Postgres is healthy                |
+| `server`                 | `Dockerfile` → `server` | Starts only after `migrate` exits successfully; `127.0.0.1:8080`      |
+| `worker-01`, `worker-02` | `Dockerfile` → `worker` | Fixed names, so restarts keep their registration                      |
+| `frontend`               | `frontend/Dockerfile`   | Standalone Next.js server on `127.0.0.1:3000`                         |
+
+The Go images are static binaries on a distroless, non-root base. All ports bind to localhost only. Compose falls back to a development worker token when `TSUZUKU_WORKER_TOKEN` is unset.
 
 ## Data model
 

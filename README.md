@@ -28,14 +28,30 @@ Observability: OpenTelemetry, Prometheus, Grafana
 
 ## Development
 
-### Prerequisites
+### Run everything with Docker
+
+The only requirement is [Docker](https://docs.docker.com/get-docker/) with Compose v2.
+
+```bash
+docker compose up --build
+```
+
+This starts PostgreSQL, applies migrations, then runs the API server, two workers (`worker-01`, `worker-02`), and the dashboard:
+
+- Dashboard: <http://localhost:3000>
+- API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`)
+
+Stop a worker with `docker compose stop worker-02` and the dashboard shows it `offline` within about 15 seconds; `docker compose start worker-02` brings it back with the same ID. `docker compose down` stops the stack and keeps the database; add `-v` to wipe it.
+
+### Prerequisites for host development
 
 - [Go 1.27+](https://go.dev/dl/)
 - [Task](https://taskfile.dev/) (`winget install Task.Task`, `brew install go-task`)
 - [golangci-lint v2](https://golangci-lint.run/welcome/install/)
 - [Docker](https://docs.docker.com/get-docker/) (PostgreSQL, sqlc, and integration tests)
+- [Node.js 24](https://nodejs.org/) and pnpm (`corepack enable`) for the dashboard
 
-### Quickstart
+### Host quickstart
 
 ```bash
 cp .env.example .env   # database URL and a development worker token
@@ -46,6 +62,7 @@ task run:server        # API on http://localhost:8080
 task run:worker        # in a second terminal; registers and sends heartbeats
 curl http://localhost:8080/readyz
 curl http://localhost:8080/api/v1/workers
+task fe:install && task fe:dev   # dashboard with hot reload on http://localhost:3000
 ```
 
 The server needs the database to start. Stop the worker and it shows as `offline` after `TSUZUKU_WORKER_STALE_AFTER` (15s by default).
@@ -54,6 +71,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 
 | Command                 | What it does                                        |
 | ----------------------- | --------------------------------------------------- |
+| `task up` / `down` / `logs` | Start, stop, or follow the full Docker stack    |
 | `task build`            | Build `bin/server`, `bin/worker`, and `bin/migrate` |
 | `task test`             | Run unit tests                                      |
 | `task test:integration` | Run unit and integration tests (needs Docker)       |
@@ -63,6 +81,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task migrate:up` / `migrate:down` / `migrate:status` | Manage schema migrations |
 | `task migrate:create -- NAME` | Add a new SQL migration                       |
 | `task sqlc`             | Regenerate query code after changing SQL            |
+| `task fe:dev` / `fe:lint` / `fe:typecheck` / `fe:build` | Dashboard development and checks |
 
 ### Configuration
 
