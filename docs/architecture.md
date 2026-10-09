@@ -123,10 +123,23 @@ The Go images are static binaries on a distroless, non-root base. All ports bind
 
 ## Data model
 
-PostgreSQL holds workloads, jobs, their full transition history, attempts, leases, logs, verification results, failures, and deliveries. Access goes through `internal/store`: a `pgxpool` connection pool, a `WithTx` transaction helper, and sqlc-generated queries ([ADR 0002](adr/0002-postgres-access-pgx-sqlc-goose.md)). Only `server`, `migrate`, and `seed` read `TSUZUKU_DATABASE_URL`.
+PostgreSQL holds workloads, jobs, their full transition history, attempts, leases, logs, verification results, failures, and deliveries. It is also the job queue: queued work is jobs in state `QUEUED`, claimed with `FOR UPDATE SKIP LOCKED` and owned through expiring leases ([ADR 0003](adr/0003-postgres-as-job-queue.md)). Access goes through `internal/store`: a `pgxpool` connection pool, a `WithTx` transaction helper, and sqlc-generated queries ([ADR 0002](adr/0002-postgres-access-pgx-sqlc-goose.md)). Only `server`, `migrate`, and `seed` read `TSUZUKU_DATABASE_URL`.
 
 See [Database design](database-design.md) for the schema, conventions, and the invariants the database enforces.
 
+## Continuous integration
+
+Every push to `main` and every pull request runs `.github/workflows/ci.yml`:
+
+| Job                | Checks                                                                                |
+| ------------------ | ------------------------------------------------------------------------------------- |
+| Go                 | `go mod tidy -diff`, `go vet`, golangci-lint, unit and integration tests with `-race` |
+| Generated code     | `sqlc diff` fails if `internal/store/db` is stale                                     |
+| Dashboard          | `pnpm` lint, typecheck, and production build                                          |
+| Compose smoke test | Builds every image, starts the stack, and waits for `/readyz` and two online workers  |
+
+Third-party actions are pinned to commit SHAs. `task ci` runs the same checks locally, except the smoke test.
+
 ## Status
 
-This document grows with each milestone. Sections still to come: job state machine, scheduling and claiming, runtime isolation, verification, and evidence.
+Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Sections still to come: job state machine, scheduling and claiming, runtime isolation, verification, and evidence.

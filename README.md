@@ -1,5 +1,7 @@
 # Tsuzuku Runner 🏃‍♂️
 
+[![CI](https://github.com/Khantdotcom/Tsuzuku-Runner/actions/workflows/ci.yml/badge.svg)](https://github.com/Khantdotcom/Tsuzuku-Runner/actions/workflows/ci.yml)
+
 Tsuzuku (続く) in Japanese means "to continue" or "to keep on".
 
 Tsuzuku Runner is an execution engine designed to manage, verify, and recover autonomous software workloads.
@@ -82,6 +84,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task migrate:create -- NAME` | Add a new SQL migration                       |
 | `task sqlc`             | Regenerate query code after changing SQL            |
 | `task fe:dev` / `fe:lint` / `fe:typecheck` / `fe:build` | Dashboard development and checks |
+| `task ci`               | Run the CI checks locally (Go, sqlc drift, dashboard) |
 
 ### Configuration
 
@@ -91,7 +94,7 @@ All configuration comes from environment variables prefixed with `TSUZUKU_`. See
 
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
-- [Architecture Decision Records](docs/adr/)
+- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md)
 
 ## License
 
