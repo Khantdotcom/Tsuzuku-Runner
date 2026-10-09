@@ -14,6 +14,8 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 )
 
 func main() {
@@ -33,10 +35,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	pool, err := store.Open(ctx, cfg.URL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	router := api.NewRouter(api.Config{
+		Logger:           logger,
+		DB:               pool,
+		Workers:          db.New(pool),
+		WorkerToken:      cfg.Token,
+		WorkerStaleAfter: cfg.WorkerStaleAfter,
+	})
+
 	// No WriteTimeout: later milestones stream logs over long-lived SSE connections.
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           api.NewRouter(logger),
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

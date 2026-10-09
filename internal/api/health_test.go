@@ -1,18 +1,12 @@
 package api
 
 import (
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
 func TestHealthz(t *testing.T) {
-	router := NewRouter(slog.New(slog.DiscardHandler))
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	rec := serve(t, newTestRouter(nil, nil), http.MethodGet, "/healthz", "", "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
@@ -26,13 +20,21 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestHealthzRejectsWrongMethod(t *testing.T) {
-	router := NewRouter(slog.New(slog.DiscardHandler))
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/healthz", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
+	rec := serve(t, newTestRouter(nil, nil), http.MethodPost, "/healthz", "", "")
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+	decodeProblem(t, rec)
+}
+
+func TestUnknownRouteReturnsProblem(t *testing.T) {
+	rec := serve(t, newTestRouter(nil, nil), http.MethodGet, "/nope", "", "")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if p := decodeProblem(t, rec); p.Instance != "/nope" {
+		t.Errorf("instance = %q, want /nope", p.Instance)
 	}
 }

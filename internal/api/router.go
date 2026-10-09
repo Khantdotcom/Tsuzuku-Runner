@@ -10,15 +10,58 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+// Config holds the API's dependencies and settings.
+type Config struct {
+	Logger  *slog.Logger
+	DB      Pinger
+	Workers WorkerStore
+	// WorkerToken is the shared bearer token workers must present.
+	WorkerToken string
+	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
+	WorkerStaleAfter time.Duration
+}
+
+type server struct {
+	logger           *slog.Logger
+	db               Pinger
+	workers          WorkerStore
+	workerStaleAfter time.Duration
+}
+
 // NewRouter builds the HTTP handler for the API server.
-func NewRouter(logger *slog.Logger) http.Handler {
+func NewRouter(cfg Config) http.Handler {
+	s := &server{
+		logger:           cfg.Logger,
+		db:               cfg.DB,
+		workers:          cfg.Workers,
+		workerStaleAfter: cfg.WorkerStaleAfter,
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
-	r.Use(requestLogger(logger))
+	r.Use(requestLogger(cfg.Logger))
 	r.Use(middleware.Recoverer)
 
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		writeProblem(w, r, http.StatusNotFound, "")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		writeProblem(w, r, http.StatusMethodNotAllowed, "")
+	})
+
 	r.Get("/healthz", handleHealthz)
+	r.Get("/readyz", s.handleReadyz)
+
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Get("/workers", s.handleListWorkers)
+
+		r.Group(func(r chi.Router) {
+			r.Use(requireWorkerToken(cfg.WorkerToken))
+			r.Post("/workers/register", s.handleRegisterWorker)
+			r.Post("/workers/{id}/heartbeat", s.handleHeartbeat)
+		})
+	})
 
 	return r
 }
