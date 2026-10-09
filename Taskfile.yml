@@ -145,6 +145,18 @@ tasks:
     cmds:
       - go test -race ./...
 
+  ci:
+    desc: Run the CI checks locally (Go tidy, vet, lint, tests; sqlc drift; dashboard lint, typecheck, build)
+    cmds:
+      - go mod tidy -diff
+      - go vet -tags integration ./...
+      - task: lint
+      - task: test:integration
+      - task: sqlc:check
+      - task: fe:lint
+      - task: fe:typecheck
+      - task: fe:build
+
   lint:
     desc: Run golangci-lint
     cmds:
