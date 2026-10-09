@@ -156,6 +156,8 @@ type Worker struct {
 	Metadata        json.RawMessage
 	RegisteredAt    time.Time
 	LastHeartbeatAt time.Time
+	CpuUsedPercent  *float64
+	MemoryUsedMB    *int32
 }
 
 type Workload struct {

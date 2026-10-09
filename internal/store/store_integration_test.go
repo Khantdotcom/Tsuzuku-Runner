@@ -254,6 +254,74 @@ func TestColumnRoundTrips(t *testing.T) {
 	}
 }
 
+func TestUpsertWorkerKeepsIdentity(t *testing.T) {
+	ctx := t.Context()
+	q := db.New(storetest.NewPool(t))
+
+	params := db.UpsertWorkerParams{
+		ID: uuid.Must(uuid.NewV7()), Name: "builder", Slots: 1, CpuMillis: 1000, MemoryMB: 1024,
+		Metadata: json.RawMessage(`{"version": "a"}`),
+	}
+	first, err := q.UpsertWorker(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	params.ID = uuid.Must(uuid.NewV7())
+	params.Slots = 4
+	params.Metadata = json.RawMessage(`{"version": "b"}`)
+	second, err := q.UpsertWorker(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if second.ID != first.ID || !second.RegisteredAt.Equal(first.RegisteredAt) {
+		t.Errorf("re-register changed identity: %s@%s -> %s@%s", first.ID, first.RegisteredAt, second.ID, second.RegisteredAt)
+	}
+	if second.Slots != 4 || !bytes.Contains(second.Metadata, []byte(`"b"`)) {
+		t.Errorf("re-register did not update capacity: %+v", second)
+	}
+	if second.LastHeartbeatAt.Before(first.LastHeartbeatAt) {
+		t.Errorf("last heartbeat moved backwards")
+	}
+}
+
+func TestRecordHeartbeat(t *testing.T) {
+	ctx := t.Context()
+	pool := storetest.NewPool(t)
+	f := newFixture(t, pool)
+	q := db.New(pool)
+
+	cpu, mem := 42.5, int32(2048)
+	n, err := q.RecordHeartbeat(ctx, db.RecordHeartbeatParams{ID: f.worker.ID, CpuUsedPercent: &cpu, MemoryUsedMB: &mem})
+	if err != nil || n != 1 {
+		t.Fatalf("heartbeat for known worker: rows %d, err %v", n, err)
+	}
+	n, err = q.RecordHeartbeat(ctx, db.RecordHeartbeatParams{ID: uuid.Must(uuid.NewV7()), CpuUsedPercent: &cpu, MemoryUsedMB: &mem})
+	if err != nil || n != 0 {
+		t.Fatalf("heartbeat for unknown worker: rows %d, err %v", n, err)
+	}
+
+	rows, err := q.ListWorkers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("workers = %d, want 1", len(rows))
+	}
+	w := rows[0].Worker
+	if w.CpuUsedPercent == nil || *w.CpuUsedPercent != cpu || w.MemoryUsedMB == nil || *w.MemoryUsedMB != mem {
+		t.Errorf("usage = %v / %v", w.CpuUsedPercent, w.MemoryUsedMB)
+	}
+	if age := rows[0].DBNow.Sub(w.LastHeartbeatAt); age < 0 || age > time.Minute {
+		t.Errorf("heartbeat age = %v, want a recent heartbeat by the database clock", age)
+	}
+
+	tooHigh := 100.5
+	_, err = q.RecordHeartbeat(ctx, db.RecordHeartbeatParams{ID: f.worker.ID, CpuUsedPercent: &tooHigh, MemoryUsedMB: &mem})
+	requireSQLState(t, err, checkViolation)
+}
+
 type fixture struct {
 	worker   db.Worker
 	workload db.Workload

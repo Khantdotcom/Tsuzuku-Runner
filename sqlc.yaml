@@ -13,6 +13,8 @@ sql:
         rename:
           repository_url: RepositoryURL
           memory_mb: MemoryMB
+          memory_used_mb: MemoryUsedMB
+          db_now: DBNow
         overrides:
           - db_type: uuid
             go_type: github.com/google/uuid.UUID

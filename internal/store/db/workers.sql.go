@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -15,7 +16,7 @@ import (
 const createWorker = `-- name: CreateWorker :one
 INSERT INTO workers (id, name, slots, cpu_millis, memory_mb, metadata)
 VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, name, slots, cpu_millis, memory_mb, metadata, registered_at, last_heartbeat_at
+RETURNING id, name, slots, cpu_millis, memory_mb, metadata, registered_at, last_heartbeat_at, cpu_used_percent, memory_used_mb
 `
 
 type CreateWorkerParams struct {
@@ -46,12 +47,14 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.Metadata,
 		&i.RegisteredAt,
 		&i.LastHeartbeatAt,
+		&i.CpuUsedPercent,
+		&i.MemoryUsedMB,
 	)
 	return i, err
 }
 
 const getWorkerByName = `-- name: GetWorkerByName :one
-SELECT id, name, slots, cpu_millis, memory_mb, metadata, registered_at, last_heartbeat_at FROM workers
+SELECT id, name, slots, cpu_millis, memory_mb, metadata, registered_at, last_heartbeat_at, cpu_used_percent, memory_used_mb FROM workers
 WHERE name = $1
 `
 
@@ -67,6 +70,123 @@ func (q *Queries) GetWorkerByName(ctx context.Context, name string) (Worker, err
 		&i.Metadata,
 		&i.RegisteredAt,
 		&i.LastHeartbeatAt,
+		&i.CpuUsedPercent,
+		&i.MemoryUsedMB,
+	)
+	return i, err
+}
+
+const listWorkers = `-- name: ListWorkers :many
+SELECT workers.id, workers.name, workers.slots, workers.cpu_millis, workers.memory_mb, workers.metadata, workers.registered_at, workers.last_heartbeat_at, workers.cpu_used_percent, workers.memory_used_mb, now()::timestamptz AS db_now
+FROM workers
+ORDER BY name
+`
+
+type ListWorkersRow struct {
+	Worker Worker
+	DBNow  time.Time
+}
+
+// ListWorkers also returns the database clock so liveness is judged against
+// the same clock that stamped last_heartbeat_at.
+func (q *Queries) ListWorkers(ctx context.Context) ([]ListWorkersRow, error) {
+	rows, err := q.db.Query(ctx, listWorkers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWorkersRow{}
+	for rows.Next() {
+		var i ListWorkersRow
+		if err := rows.Scan(
+			&i.Worker.ID,
+			&i.Worker.Name,
+			&i.Worker.Slots,
+			&i.Worker.CpuMillis,
+			&i.Worker.MemoryMB,
+			&i.Worker.Metadata,
+			&i.Worker.RegisteredAt,
+			&i.Worker.LastHeartbeatAt,
+			&i.Worker.CpuUsedPercent,
+			&i.Worker.MemoryUsedMB,
+			&i.DBNow,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const recordHeartbeat = `-- name: RecordHeartbeat :execrows
+UPDATE workers
+SET last_heartbeat_at = now(),
+    cpu_used_percent  = $1,
+    memory_used_mb    = $2
+WHERE id = $3
+`
+
+type RecordHeartbeatParams struct {
+	CpuUsedPercent *float64
+	MemoryUsedMB   *int32
+	ID             uuid.UUID
+}
+
+func (q *Queries) RecordHeartbeat(ctx context.Context, arg RecordHeartbeatParams) (int64, error) {
+	result, err := q.db.Exec(ctx, recordHeartbeat, arg.CpuUsedPercent, arg.MemoryUsedMB, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const upsertWorker = `-- name: UpsertWorker :one
+INSERT INTO workers (id, name, slots, cpu_millis, memory_mb, metadata)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (name) DO UPDATE SET
+    slots             = EXCLUDED.slots,
+    cpu_millis        = EXCLUDED.cpu_millis,
+    memory_mb         = EXCLUDED.memory_mb,
+    metadata          = EXCLUDED.metadata,
+    last_heartbeat_at = now()
+RETURNING id, name, slots, cpu_millis, memory_mb, metadata, registered_at, last_heartbeat_at, cpu_used_percent, memory_used_mb
+`
+
+type UpsertWorkerParams struct {
+	ID        uuid.UUID
+	Name      string
+	Slots     int32
+	CpuMillis int32
+	MemoryMB  int32
+	Metadata  json.RawMessage
+}
+
+// UpsertWorker registers a worker by name. A worker that registers again
+// (for example after a restart) keeps its ID and registered_at.
+func (q *Queries) UpsertWorker(ctx context.Context, arg UpsertWorkerParams) (Worker, error) {
+	row := q.db.QueryRow(ctx, upsertWorker,
+		arg.ID,
+		arg.Name,
+		arg.Slots,
+		arg.CpuMillis,
+		arg.MemoryMB,
+		arg.Metadata,
+	)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slots,
+		&i.CpuMillis,
+		&i.MemoryMB,
+		&i.Metadata,
+		&i.RegisteredAt,
+		&i.LastHeartbeatAt,
+		&i.CpuUsedPercent,
+		&i.MemoryUsedMB,
 	)
 	return i, err
 }
