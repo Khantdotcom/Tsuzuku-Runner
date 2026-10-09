@@ -33,11 +33,15 @@ Observability: OpenTelemetry, Prometheus, Grafana
 - [Go 1.27+](https://go.dev/dl/)
 - [Task](https://taskfile.dev/) (`winget install Task.Task`, `brew install go-task`)
 - [golangci-lint v2](https://golangci-lint.run/welcome/install/)
+- [Docker](https://docs.docker.com/get-docker/) (PostgreSQL, sqlc, and integration tests)
 
 ### Quickstart
 
 ```bash
-cp .env.example .env   # optional; every setting has a default
+cp .env.example .env   # sets TSUZUKU_DATABASE_URL for the local database
+task db:up             # PostgreSQL 17 on localhost:5433
+task migrate:up        # create the schema
+task seed              # optional: example job history
 task run:server        # API on http://localhost:8080
 task run:worker        # in a second terminal
 curl http://localhost:8080/healthz
@@ -45,12 +49,17 @@ curl http://localhost:8080/healthz
 
 ### Common tasks
 
-| Command      | What it does                         |
-| ------------ | ------------------------------------ |
-| `task build` | Build `bin/server` and `bin/worker`  |
-| `task test`  | Run unit tests                       |
-| `task lint`  | Run golangci-lint                    |
-| `task fmt`   | Format code (gofumpt + goimports)    |
+| Command                 | What it does                                        |
+| ----------------------- | --------------------------------------------------- |
+| `task build`            | Build `bin/server`, `bin/worker`, and `bin/migrate` |
+| `task test`             | Run unit tests                                      |
+| `task test:integration` | Run unit and integration tests (needs Docker)       |
+| `task lint`             | Run golangci-lint                                   |
+| `task fmt`              | Format code (gofumpt + goimports)                   |
+| `task db:up` / `db:down` / `db:reset` | Start, stop, or wipe the local database |
+| `task migrate:up` / `migrate:down` / `migrate:status` | Manage schema migrations |
+| `task migrate:create -- NAME` | Add a new SQL migration                       |
+| `task sqlc`             | Regenerate query code after changing SQL            |
 
 ### Configuration
 
@@ -59,6 +68,7 @@ All configuration comes from environment variables prefixed with `TSUZUKU_`. See
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Database design](docs/database-design.md)
 - [Architecture Decision Records](docs/adr/)
 
 ## License

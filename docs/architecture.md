@@ -33,12 +33,14 @@ Workers talk to the control plane only through the HTTP API and never hold datab
 
 ## Process layout
 
-The codebase is a modular monolith ([ADR 0001](adr/0001-modular-monolith.md)) with two binaries:
+The codebase is a modular monolith ([ADR 0001](adr/0001-modular-monolith.md)) with two long-running binaries and two one-shot tools:
 
-| Binary        | Source        | Role                                     |
-| ------------- | ------------- | ---------------------------------------- |
-| `server`      | `cmd/server`  | API server and scheduler                 |
-| `worker`      | `cmd/worker`  | Job execution on a host with Docker      |
+| Binary    | Source        | Role                                           |
+| --------- | ------------- | ---------------------------------------------- |
+| `server`  | `cmd/server`  | API server and scheduler                       |
+| `worker`  | `cmd/worker`  | Job execution on a host with Docker            |
+| `migrate` | `cmd/migrate` | Apply, roll back, or inspect schema migrations |
+| `seed`    | `cmd/seed`    | Load example job history for development       |
 
 Domain packages live under `internal/`, one package per bounded area (`api`, `job`, `scheduler`, `worker`, `runtime`, `verification`, `evidence`, ...). Packages are added as they gain real code.
 
@@ -48,6 +50,12 @@ Domain packages live under `internal/`, one package per bounded area (`api`, `jo
 - Logging uses `log/slog`: human-readable text in development, JSON in every other environment. Every record carries a `service` attribute (`server` or `worker`).
 - Both processes shut down gracefully on `SIGINT`/`SIGTERM`.
 
+## Data model
+
+PostgreSQL holds workloads, jobs, their full transition history, attempts, leases, logs, verification results, failures, and deliveries. Access goes through `internal/store`: a `pgxpool` connection pool, a `WithTx` transaction helper, and sqlc-generated queries ([ADR 0002](adr/0002-postgres-access-pgx-sqlc-goose.md)). Only `server`, `migrate`, and `seed` read `TSUZUKU_DATABASE_URL`.
+
+See [Database design](database-design.md) for the schema, conventions, and the invariants the database enforces.
+
 ## Status
 
-This document grows with each milestone. Sections still to come: data model, job state machine, scheduling and claiming, runtime isolation, verification, and evidence.
+This document grows with each milestone. Sections still to come: job state machine, scheduling and claiming, runtime isolation, verification, and evidence.
