@@ -85,6 +85,14 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task sqlc`             | Regenerate query code after changing SQL            |
 | `task fe:dev` / `fe:lint` / `fe:typecheck` / `fe:build` | Dashboard development and checks |
 | `task ci`               | Run the CI checks locally (Go, sqlc drift, dashboard) |
+| `task test:docker`      | Run unit and integration tests with `-race` in a Go container |
+| `task lint:docker` / `fe:docker` | Run golangci-lint, or the dashboard lint, typecheck, and build, in a container |
+| `task ci:docker`        | Run the full CI checks with only Docker on the host |
+| `task smoke`            | Build and start an isolated stack, check workers and readiness, then remove it |
+
+The `:docker` variants need only Docker and Task. Use them where host toolchains can't run, for example on Windows when Smart App Control blocks freshly built test binaries, `gcc` is missing for `-race`, or `pnpm` is blocked.
+
+`task smoke` runs as a separate Compose project (`tsuzuku-smoke`) on ports 15433, 18080, and 13000, so it never touches the development stack or its data. Change the development ports with `TSUZUKU_PG_HOST_PORT`, `TSUZUKU_API_HOST_PORT`, and `TSUZUKU_UI_HOST_PORT`.
 
 ### Configuration
 
