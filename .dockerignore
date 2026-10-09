@@ -1,0 +1,13 @@
+.git
+.github
+.cursor
+.vscode
+.idea
+.env
+.env.*
+bin
+docs
+frontend
+*.md
+coverage.*
+*.out
