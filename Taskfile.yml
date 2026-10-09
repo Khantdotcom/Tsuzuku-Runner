@@ -5,7 +5,18 @@ dotenv: [".env"]
 vars:
   BIN_DIR: bin
   EXE: '{{if eq OS "windows"}}.exe{{end}}'
+  # Keep these images in sync with .github/workflows/ci.yml.
   SQLC_IMAGE: sqlc/sqlc:1.31.1
+  GO_IMAGE: golang:1.27
+  NODE_IMAGE: node:24
+  GOLANGCI_LINT_IMAGE: golangci/golangci-lint:v2.14.0
+  SMOKE_IMAGE: alpine:3
+  SMOKE_PROJECT: tsuzuku-smoke
+  # Shared by the *:docker tasks. Named volumes keep caches between runs and keep
+  # Linux node_modules out of the host checkout.
+  DOCKER_GO: >-
+    docker run --rm -v "{{.ROOT_DIR}}:/src" -w /src
+    -v tsuzuku-gomod:/go/pkg/mod -v tsuzuku-gocache:/root/.cache/go-build
 
 tasks:
   default:
@@ -156,6 +167,61 @@ tasks:
       - task: fe:lint
       - task: fe:typecheck
       - task: fe:build
+
+  test:docker:
+    desc: "Run unit and integration tests with the race detector in a Linux container (needs only Docker; extra go test flags: task test:docker -- -run X)"
+    cmds:
+      - >-
+        {{.DOCKER_GO}}
+        -v /var/run/docker.sock:/var/run/docker.sock
+        --add-host=host.docker.internal:host-gateway
+        -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
+        {{.GO_IMAGE}} go test -race -count=1 -tags integration {{.CLI_ARGS}} ./...
+
+  lint:docker:
+    desc: Run golangci-lint in a container (same version as CI)
+    cmds:
+      - >-
+        {{.DOCKER_GO}}
+        -v tsuzuku-golangci-cache:/root/.cache/golangci-lint
+        {{.GOLANGCI_LINT_IMAGE}} golangci-lint run
+
+  fe:docker:
+    desc: Install, lint, type-check, and build the dashboard in a container (needs only Docker)
+    cmds:
+      - >-
+        docker run --rm -v "{{.ROOT_DIR}}:/src" -w /src/frontend
+        -v tsuzuku-fe-node-modules:/src/frontend/node_modules
+        -v tsuzuku-pnpm-store:/pnpm-store
+        -v tsuzuku-corepack:/root/.cache/node/corepack
+        -e CI=true -e NEXT_TELEMETRY_DISABLED=1 -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+        {{.NODE_IMAGE}} sh -c "corepack enable
+        && pnpm install --frozen-lockfile --store-dir /pnpm-store
+        && pnpm lint && pnpm typecheck && pnpm build"
+
+  ci:docker:
+    desc: Run the CI checks with only Docker installed (Go tidy, vet, lint, race and integration tests; sqlc drift; dashboard)
+    cmds:
+      - '{{.DOCKER_GO}} {{.GO_IMAGE}} sh -c "go mod tidy -diff && go vet -tags integration ./..."'
+      - task: lint:docker
+      - task: test:docker
+      - task: sqlc:check
+      - task: fe:docker
+
+  smoke:
+    desc: Build the stack as a separate Compose project, wait for /readyz and two online workers, then remove it (dev stack and data untouched)
+    env:
+      TSUZUKU_PG_HOST_PORT: "15433"
+      TSUZUKU_API_HOST_PORT: "18080"
+      TSUZUKU_UI_HOST_PORT: "13000"
+    cmds:
+      - defer: docker compose -p {{.SMOKE_PROJECT}} down --volumes --remove-orphans
+      - defer: '{{if .EXIT_CODE}}docker compose -p {{.SMOKE_PROJECT}} logs --no-color{{else}}true{{end}}'
+      - docker compose -p {{.SMOKE_PROJECT}} up --build --detach
+      - >-
+        docker run --rm --network {{.SMOKE_PROJECT}}_default
+        -v "{{.ROOT_DIR}}/scripts:/scripts:ro"
+        {{.SMOKE_IMAGE}} sh /scripts/smoke-probe.sh
 
   lint:
     desc: Run golangci-lint
