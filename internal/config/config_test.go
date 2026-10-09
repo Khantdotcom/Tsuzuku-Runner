@@ -115,6 +115,34 @@ func TestLoadWorkerOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadDBTool(t *testing.T) {
+	const url = "postgres://tsuzuku:tsuzuku@127.0.0.1:5433/tsuzuku?sslmode=disable"
+	cfg, err := loadDBTool(map[string]string{"TSUZUKU_DATABASE_URL": url})
+	if err != nil {
+		t.Fatalf("loadDBTool: %v", err)
+	}
+	if cfg.URL != url {
+		t.Errorf("URL = %q, want %q", cfg.URL, url)
+	}
+	if cfg.Env != Development {
+		t.Errorf("Env = %q, want %q", cfg.Env, Development)
+	}
+}
+
+func TestLoadDBToolRequiresURL(t *testing.T) {
+	for name, environ := range map[string]map[string]string{
+		"unset": {},
+		"empty": {"TSUZUKU_DATABASE_URL": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadDBTool(environ)
+			if err == nil || !strings.Contains(err.Error(), "TSUZUKU_DATABASE_URL") {
+				t.Fatalf("expected TSUZUKU_DATABASE_URL error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadWorkerRejectsNonPositiveHeartbeat(t *testing.T) {
 	_, err := loadWorker(map[string]string{"TSUZUKU_WORKER_HEARTBEAT_INTERVAL": "-1s"})
 	if err == nil || !strings.Contains(err.Error(), "TSUZUKU_WORKER_HEARTBEAT_INTERVAL") {

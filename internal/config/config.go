@@ -51,6 +51,18 @@ type Worker struct {
 	HeartbeatInterval time.Duration `env:"TSUZUKU_WORKER_HEARTBEAT_INTERVAL" envDefault:"5s"`
 }
 
+// Database holds PostgreSQL connection settings. Workers never load it: they
+// reach the database only through the API.
+type Database struct {
+	URL string `env:"TSUZUKU_DATABASE_URL,required,notEmpty"`
+}
+
+// DBTool configures one-shot database commands such as migrate and seed.
+type DBTool struct {
+	Common
+	Database
+}
+
 // LoadServer reads Server configuration from the process environment.
 func LoadServer() (Server, error) {
 	return loadServer(env.ToMap(os.Environ()))
@@ -59,6 +71,11 @@ func LoadServer() (Server, error) {
 // LoadWorker reads Worker configuration from the process environment.
 func LoadWorker() (Worker, error) {
 	return loadWorker(env.ToMap(os.Environ()))
+}
+
+// LoadDBTool reads DBTool configuration from the process environment.
+func LoadDBTool() (DBTool, error) {
+	return loadDBTool(env.ToMap(os.Environ()))
 }
 
 func loadServer(environ map[string]string) (Server, error) {
@@ -92,6 +109,17 @@ func loadWorker(environ map[string]string) (Worker, error) {
 			return Worker{}, fmt.Errorf("resolve default worker name: %w", err)
 		}
 		cfg.Name = host
+	}
+	return cfg, nil
+}
+
+func loadDBTool(environ map[string]string) (DBTool, error) {
+	cfg, err := env.ParseAsWithOptions[DBTool](env.Options{Environment: environ})
+	if err != nil {
+		return DBTool{}, fmt.Errorf("parse database config: %w", err)
+	}
+	if err := cfg.validate(); err != nil {
+		return DBTool{}, err
 	}
 	return cfg, nil
 }
