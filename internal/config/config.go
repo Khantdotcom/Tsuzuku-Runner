@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"time"
 
@@ -18,6 +19,9 @@ const (
 	Test        Environment = "test"
 	Production  Environment = "production"
 )
+
+// minProductionTokenLen is the shortest worker token accepted in production.
+const minProductionTokenLen = 32
 
 func (e Environment) valid() bool {
 	switch e {
@@ -34,27 +38,39 @@ type Common struct {
 	LogLevel slog.Level  `env:"TSUZUKU_LOG_LEVEL" envDefault:"info"`
 }
 
+// Database holds PostgreSQL connection settings. Workers never load it: they
+// reach the database only through the API.
+type Database struct {
+	URL string `env:"TSUZUKU_DATABASE_URL,required,notEmpty"`
+}
+
+// WorkerAuth holds the shared bearer token workers present to the API.
+type WorkerAuth struct {
+	Token string `env:"TSUZUKU_WORKER_TOKEN,required,notEmpty"`
+}
+
 // Server configures the API server process.
 type Server struct {
 	Common
+	Database
+	WorkerAuth
 
 	HTTPAddr        string        `env:"TSUZUKU_HTTP_ADDR"        envDefault:":8080"`
 	ShutdownTimeout time.Duration `env:"TSUZUKU_SHUTDOWN_TIMEOUT" envDefault:"10s"`
+	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
+	WorkerStaleAfter time.Duration `env:"TSUZUKU_WORKER_STALE_AFTER" envDefault:"15s"`
 }
 
 // Worker configures the worker process.
 type Worker struct {
 	Common
+	WorkerAuth
 
 	// Name defaults to the host name when unset.
 	Name              string        `env:"TSUZUKU_WORKER_NAME"`
+	APIURL            string        `env:"TSUZUKU_API_URL"                   envDefault:"http://localhost:8080"`
+	Slots             int           `env:"TSUZUKU_WORKER_SLOTS"              envDefault:"2"`
 	HeartbeatInterval time.Duration `env:"TSUZUKU_WORKER_HEARTBEAT_INTERVAL" envDefault:"5s"`
-}
-
-// Database holds PostgreSQL connection settings. Workers never load it: they
-// reach the database only through the API.
-type Database struct {
-	URL string `env:"TSUZUKU_DATABASE_URL,required,notEmpty"`
 }
 
 // DBTool configures one-shot database commands such as migrate and seed.
@@ -83,11 +99,17 @@ func loadServer(environ map[string]string) (Server, error) {
 	if err != nil {
 		return Server{}, fmt.Errorf("parse server config: %w", err)
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Common.validate(); err != nil {
+		return Server{}, err
+	}
+	if err := cfg.WorkerAuth.validate(cfg.Env); err != nil {
 		return Server{}, err
 	}
 	if cfg.ShutdownTimeout <= 0 {
 		return Server{}, fmt.Errorf("TSUZUKU_SHUTDOWN_TIMEOUT must be positive, got %s", cfg.ShutdownTimeout)
+	}
+	if cfg.WorkerStaleAfter <= 0 {
+		return Server{}, fmt.Errorf("TSUZUKU_WORKER_STALE_AFTER must be positive, got %s", cfg.WorkerStaleAfter)
 	}
 	return cfg, nil
 }
@@ -97,11 +119,20 @@ func loadWorker(environ map[string]string) (Worker, error) {
 	if err != nil {
 		return Worker{}, fmt.Errorf("parse worker config: %w", err)
 	}
-	if err := cfg.validate(); err != nil {
+	if err := cfg.Common.validate(); err != nil {
+		return Worker{}, err
+	}
+	if err := cfg.WorkerAuth.validate(cfg.Env); err != nil {
 		return Worker{}, err
 	}
 	if cfg.HeartbeatInterval <= 0 {
 		return Worker{}, fmt.Errorf("TSUZUKU_WORKER_HEARTBEAT_INTERVAL must be positive, got %s", cfg.HeartbeatInterval)
+	}
+	if cfg.Slots <= 0 {
+		return Worker{}, fmt.Errorf("TSUZUKU_WORKER_SLOTS must be positive, got %d", cfg.Slots)
+	}
+	if u, err := url.Parse(cfg.APIURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return Worker{}, fmt.Errorf("TSUZUKU_API_URL must be an http(s) URL with a host, got %q", cfg.APIURL)
 	}
 	if cfg.Name == "" {
 		host, err := os.Hostname()
@@ -127,6 +158,13 @@ func loadDBTool(environ map[string]string) (DBTool, error) {
 func (c Common) validate() error {
 	if !c.Env.valid() {
 		return fmt.Errorf("TSUZUKU_ENV must be one of development, test, production; got %q", c.Env)
+	}
+	return nil
+}
+
+func (a WorkerAuth) validate(e Environment) error {
+	if e == Production && len(a.Token) < minProductionTokenLen {
+		return fmt.Errorf("TSUZUKU_WORKER_TOKEN must be at least %d characters in production", minProductionTokenLen)
 	}
 	return nil
 }
