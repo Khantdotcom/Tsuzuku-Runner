@@ -57,6 +57,7 @@ func newServerWithPool(t *testing.T, staleAfter time.Duration) (*httptest.Server
 		Workers:          db.New(pool),
 		Jobs:             jobs,
 		Claimer:          jobs,
+		Attempts:         jobs,
 		Assignments:      notifier,
 		WorkerToken:      token,
 		WorkerStaleAfter: staleAfter,

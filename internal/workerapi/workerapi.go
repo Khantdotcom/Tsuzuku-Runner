@@ -38,6 +38,84 @@ type ClaimResponse struct {
 	Spec          workload.Spec `json:"spec"`
 }
 
+// Attempt report actions. A worker reports each phase of an attempt it
+// claimed; the server rejects reports for attempts the worker does not own
+// or that have already finished.
+const (
+	// ActionExecuting reports that the checkout succeeded and the command is
+	// starting. Body: ExecutingRequest. Response: 204.
+	ActionExecuting = "executing"
+	// ActionVerifying reports the command's result. Body: VerifyingRequest.
+	// Response: 200 with VerifyingResponse.
+	ActionVerifying = "verifying"
+	// ActionFinish ends the attempt. Body: FinishRequest. Response: 204.
+	ActionFinish = "finish"
+)
+
+// AttemptPath returns the endpoint for reporting action on an attempt.
+func AttemptPath(workerID, attemptID uuid.UUID, action string) string {
+	return "/api/v1/workers/" + workerID.String() + "/attempts/" + attemptID.String() + "/" + action
+}
+
+// Runtime roles: the container that checked out the repository, the one that
+// ran the command, and the one that ran verification.
+const (
+	RolePrepare = "prepare"
+	RoleExecute = "execute"
+	RoleVerify  = "verify"
+)
+
+// Runtime describes one container an attempt used. Times come from the
+// worker's clock, so only their difference is meaningful.
+type Runtime struct {
+	Role        string    `json:"role"`
+	Image       string    `json:"image"`
+	ContainerID string    `json:"container_id,omitempty"`
+	VolumeName  string    `json:"volume_name,omitempty"`
+	CPUMillis   int       `json:"cpu_millis"`
+	MemoryMB    int       `json:"memory_mb"`
+	Network     bool      `json:"network"`
+	StartedAt   time.Time `json:"started_at"`
+	FinishedAt  time.Time `json:"finished_at"`
+}
+
+// StepResult is how a command run in a container ended.
+type StepResult struct {
+	ExitCode   int   `json:"exit_code"`
+	TimedOut   bool  `json:"timed_out"`
+	DurationMS int64 `json:"duration_ms"`
+}
+
+// ExecutingRequest reports a successful checkout.
+type ExecutingRequest struct {
+	// Commit is the full commit hash the revision resolved to.
+	Commit  string  `json:"commit"`
+	Runtime Runtime `json:"runtime"`
+}
+
+// VerifyingRequest reports how the workload command ended.
+type VerifyingRequest struct {
+	Execution StepResult `json:"execution"`
+	Runtime   Runtime    `json:"runtime"`
+}
+
+// VerifyingResponse tells the worker whether to run verification. It is
+// false when the server already ended the job, for example after a timeout.
+type VerifyingResponse struct {
+	Verify bool `json:"verify"`
+}
+
+// FinishRequest ends an attempt. With neither Error nor Cancelled set, the
+// server decides the job's outcome from the results reported so far.
+type FinishRequest struct {
+	// Error describes a failure outside the workload, such as a checkout or
+	// container error, that stopped the attempt early.
+	Error string `json:"error,omitempty"`
+	// Cancelled reports that the attempt stopped because it was cancelled.
+	Cancelled bool     `json:"cancelled,omitempty"`
+	Runtime   *Runtime `json:"runtime,omitempty"`
+}
+
 // RegisterRequest announces a worker and its capacity. Registering again with
 // the same name updates the existing worker and keeps its ID.
 type RegisterRequest struct {

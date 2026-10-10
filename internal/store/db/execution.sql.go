@@ -117,6 +117,97 @@ func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (J
 	return i, err
 }
 
+const createRuntime = `-- name: CreateRuntime :one
+INSERT INTO runtimes (
+    id, attempt_id, kind, role, image, container_id, volume_name,
+    cpu_millis, memory_mb, network_enabled, created_at, destroyed_at
+) VALUES (
+    $1, $2, 'docker', $3, $4, $5, $6,
+    $7, $8, $9, $10, $11
+)
+RETURNING id, attempt_id, kind, role, image, container_id, volume_name, cpu_millis, memory_mb, network_enabled, created_at, destroyed_at
+`
+
+type CreateRuntimeParams struct {
+	ID             uuid.UUID
+	AttemptID      uuid.UUID
+	Role           string
+	Image          string
+	ContainerID    *string
+	VolumeName     *string
+	CpuMillis      int32
+	MemoryMB       int32
+	NetworkEnabled bool
+	CreatedAt      time.Time
+	DestroyedAt    *time.Time
+}
+
+func (q *Queries) CreateRuntime(ctx context.Context, arg CreateRuntimeParams) (Runtime, error) {
+	row := q.db.QueryRow(ctx, createRuntime,
+		arg.ID,
+		arg.AttemptID,
+		arg.Role,
+		arg.Image,
+		arg.ContainerID,
+		arg.VolumeName,
+		arg.CpuMillis,
+		arg.MemoryMB,
+		arg.NetworkEnabled,
+		arg.CreatedAt,
+		arg.DestroyedAt,
+	)
+	var i Runtime
+	err := row.Scan(
+		&i.ID,
+		&i.AttemptID,
+		&i.Kind,
+		&i.Role,
+		&i.Image,
+		&i.ContainerID,
+		&i.VolumeName,
+		&i.CpuMillis,
+		&i.MemoryMB,
+		&i.NetworkEnabled,
+		&i.CreatedAt,
+		&i.DestroyedAt,
+	)
+	return i, err
+}
+
+const finishAttempt = `-- name: FinishAttempt :one
+UPDATE job_attempts
+SET status      = $1,
+    error       = $2,
+    finished_at = now()
+WHERE id = $3 AND status = 'RUNNING'
+RETURNING id, job_id, attempt_number, worker_id, status, exit_code, error, started_at, finished_at
+`
+
+type FinishAttemptParams struct {
+	Status string
+	Error  *string
+	ID     uuid.UUID
+}
+
+// FinishAttempt ends a RUNNING attempt; it returns no row if the attempt has
+// already finished.
+func (q *Queries) FinishAttempt(ctx context.Context, arg FinishAttemptParams) (JobAttempt, error) {
+	row := q.db.QueryRow(ctx, finishAttempt, arg.Status, arg.Error, arg.ID)
+	var i JobAttempt
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.AttemptNumber,
+		&i.WorkerID,
+		&i.Status,
+		&i.ExitCode,
+		&i.Error,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const listAttempts = `-- name: ListAttempts :many
 SELECT id, job_id, attempt_number, worker_id, status, exit_code, error, started_at, finished_at FROM job_attempts
 WHERE job_id = $1
@@ -194,6 +285,70 @@ func (q *Queries) ListLogChunks(ctx context.Context, arg ListLogChunksParams) ([
 	return items, nil
 }
 
+const listRuntimes = `-- name: ListRuntimes :many
+SELECT r.id, r.attempt_id, r.kind, r.role, r.image, r.container_id, r.volume_name, r.cpu_millis, r.memory_mb, r.network_enabled, r.created_at, r.destroyed_at FROM runtimes r
+JOIN job_attempts a ON a.id = r.attempt_id
+WHERE a.job_id = $1
+ORDER BY r.created_at, r.id
+`
+
+func (q *Queries) ListRuntimes(ctx context.Context, jobID uuid.UUID) ([]Runtime, error) {
+	rows, err := q.db.Query(ctx, listRuntimes, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Runtime{}
+	for rows.Next() {
+		var i Runtime
+		if err := rows.Scan(
+			&i.ID,
+			&i.AttemptID,
+			&i.Kind,
+			&i.Role,
+			&i.Image,
+			&i.ContainerID,
+			&i.VolumeName,
+			&i.CpuMillis,
+			&i.MemoryMB,
+			&i.NetworkEnabled,
+			&i.CreatedAt,
+			&i.DestroyedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockAttempt = `-- name: LockAttempt :one
+SELECT id, job_id, attempt_number, worker_id, status, exit_code, error, started_at, finished_at FROM job_attempts
+WHERE id = $1
+FOR UPDATE
+`
+
+// LockAttempt serializes reports about one attempt for the rest of the transaction.
+func (q *Queries) LockAttempt(ctx context.Context, id uuid.UUID) (JobAttempt, error) {
+	row := q.db.QueryRow(ctx, lockAttempt, id)
+	var i JobAttempt
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.AttemptNumber,
+		&i.WorkerID,
+		&i.Status,
+		&i.ExitCode,
+		&i.Error,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const nextAttemptNumber = `-- name: NextAttemptNumber :one
 SELECT (coalesce(max(attempt_number), 0) + 1)::integer AS next
 FROM job_attempts
@@ -205,4 +360,20 @@ func (q *Queries) NextAttemptNumber(ctx context.Context, jobID uuid.UUID) (int32
 	var next int32
 	err := row.Scan(&next)
 	return next, err
+}
+
+const recordAttemptExit = `-- name: RecordAttemptExit :exec
+UPDATE job_attempts
+SET exit_code = $1
+WHERE id = $2
+`
+
+type RecordAttemptExitParams struct {
+	ExitCode *int32
+	ID       uuid.UUID
+}
+
+func (q *Queries) RecordAttemptExit(ctx context.Context, arg RecordAttemptExitParams) error {
+	_, err := q.db.Exec(ctx, recordAttemptExit, arg.ExitCode, arg.ID)
+	return err
 }

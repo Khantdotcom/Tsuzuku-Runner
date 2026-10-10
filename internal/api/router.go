@@ -9,16 +9,18 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
 // Config holds the API's dependencies and settings.
 type Config struct {
-	Logger  *slog.Logger
-	DB      Pinger
-	Workers WorkerStore
-	Jobs    JobService
-	Claimer Claimer
+	Logger   *slog.Logger
+	DB       Pinger
+	Workers  WorkerStore
+	Jobs     JobService
+	Claimer  Claimer
+	Attempts AttemptReporter
 	// Assignments, if set, wakes waiting claims as soon as jobs are scheduled.
 	Assignments AssignmentSignal
 	// Stopping, if set, is closed when the server starts shutting down, so
@@ -38,6 +40,7 @@ type server struct {
 	workers          WorkerStore
 	jobs             JobService
 	claimer          Claimer
+	attempts         AttemptReporter
 	assignments      AssignmentSignal
 	stopping         <-chan struct{}
 	workerStaleAfter time.Duration
@@ -52,6 +55,7 @@ func NewRouter(cfg Config) http.Handler {
 		workers:          cfg.Workers,
 		jobs:             cfg.Jobs,
 		claimer:          cfg.Claimer,
+		attempts:         cfg.Attempts,
 		assignments:      cfg.Assignments,
 		stopping:         cfg.Stopping,
 		workerStaleAfter: cfg.WorkerStaleAfter,
@@ -89,6 +93,11 @@ func NewRouter(cfg Config) http.Handler {
 			r.Post("/workers/register", s.handleRegisterWorker)
 			r.Post("/workers/{id}/heartbeat", s.handleHeartbeat)
 			r.Post("/workers/{id}/claim", s.handleClaim)
+			r.Route("/workers/{id}/attempts/{attemptID}", func(r chi.Router) {
+				r.Post("/"+workerapi.ActionExecuting, s.handleAttemptExecuting)
+				r.Post("/"+workerapi.ActionVerifying, s.handleAttemptVerifying)
+				r.Post("/"+workerapi.ActionFinish, s.handleAttemptFinish)
+			})
 		})
 	})
 

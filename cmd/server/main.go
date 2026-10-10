@@ -54,6 +54,7 @@ func run() error {
 		Workers:          db.New(pool),
 		Jobs:             jobs,
 		Claimer:          jobs,
+		Attempts:         jobs,
 		Assignments:      assignments,
 		Stopping:         stopping,
 		WorkerToken:      cfg.Token,

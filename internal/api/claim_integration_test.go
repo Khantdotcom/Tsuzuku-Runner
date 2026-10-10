@@ -99,6 +99,74 @@ func TestScheduleAndClaimOverHTTP(t *testing.T) {
 	}
 }
 
+func TestAttemptLifecycleOverHTTP(t *testing.T) {
+	srv, pool, notifier := newServerWithPool(t, testStale)
+	sched := scheduler.New(pool, slog.New(slog.DiscardHandler), scheduler.Options{
+		Interval: time.Second, StaleAfter: testStale, Notifier: notifier,
+	})
+	client := worker.NewClient(srv.URL, token)
+	ctx := t.Context()
+
+	reg, err := client.Register(ctx, workerapi.RegisterRequest{Name: "runner", Slots: 1, CPUMillis: 4000, MemoryMB: 8192})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intruder, err := client.Register(ctx, workerapi.RegisterRequest{Name: "intruder", Slots: 1, CPUMillis: 1000, MemoryMB: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var submitted jobBody
+	submitWorkload(t, srv.URL, workloadJSON("go test ./..."), "").decode(t, &submitted)
+	if _, err := sched.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	claim, found, err := client.Claim(ctx, reg.ID, 0)
+	if err != nil || !found {
+		// The scheduler may have placed the job on the other worker.
+		claim, found, err = client.Claim(ctx, intruder.ID, 0)
+		if err != nil || !found {
+			t.Fatalf("claim: found %v, err %v", found, err)
+		}
+		reg, intruder = intruder, reg
+	}
+
+	start := time.Now().Add(-3 * time.Second)
+	rt := func(role string) workerapi.Runtime {
+		return workerapi.Runtime{Role: role, Image: "golang:1.27", CPUMillis: 1000, MemoryMB: 512, StartedAt: start, FinishedAt: start.Add(time.Second)}
+	}
+	execReq := workerapi.ExecutingRequest{Commit: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d", Runtime: rt(workerapi.RolePrepare)}
+
+	err = client.Executing(ctx, intruder.ID, claim.AttemptID, execReq)
+	if apiErr, ok := errors.AsType[*worker.APIError](err); !ok || apiErr.Status != http.StatusNotFound {
+		t.Errorf("report from another worker: err = %v, want 404", err)
+	}
+	if err := client.Executing(ctx, reg.ID, claim.AttemptID, execReq); err != nil {
+		t.Fatalf("Executing: %v", err)
+	}
+	verify, err := client.Verifying(ctx, reg.ID, claim.AttemptID, workerapi.VerifyingRequest{
+		Execution: workerapi.StepResult{ExitCode: 0, DurationMS: 1000},
+		Runtime:   rt(workerapi.RoleExecute),
+	})
+	if err != nil || !verify {
+		t.Fatalf("Verifying: verify %v, err %v", verify, err)
+	}
+	if err := client.Finish(ctx, reg.ID, claim.AttemptID, workerapi.FinishRequest{}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	err = client.Finish(ctx, reg.ID, claim.AttemptID, workerapi.FinishRequest{})
+	if apiErr, ok := errors.AsType[*worker.APIError](err); !ok || apiErr.Status != http.StatusConflict {
+		t.Errorf("second finish: err = %v, want 409", err)
+	}
+
+	var detail jobBody
+	if status := getJSON(t, srv.URL+"/api/v1/jobs/"+submitted.ID.String(), &detail); status != http.StatusOK {
+		t.Fatalf("get job status = %d", status)
+	}
+	if detail.State != "COMPLETED" || len(detail.Transitions) != 6 {
+		t.Errorf("job = %s with %d transitions, want COMPLETED after 6", detail.State, len(detail.Transitions))
+	}
+}
+
 func TestClaimUnknownWorkerOverHTTP(t *testing.T) {
 	srv := newServer(t, testStale)
 	_, _, err := worker.NewClient(srv.URL, token).Claim(t.Context(), uuid.Must(uuid.NewV7()), 0)
