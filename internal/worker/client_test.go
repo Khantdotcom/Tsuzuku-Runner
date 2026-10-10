@@ -48,6 +48,7 @@ func TestClientRegister(t *testing.T) {
 
 func TestClientHeartbeat(t *testing.T) {
 	id := uuid.Must(uuid.NewV7())
+	cancel := uuid.Must(uuid.NewV7())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != workerapi.HeartbeatPath(id) {
 			t.Errorf("path = %s", r.URL.Path)
@@ -56,13 +57,39 @@ func TestClientHeartbeat(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CPUUsedPercent != 50 || req.MemoryUsedMB != 10 {
 			t.Errorf("body = %+v, err %v", req, err)
 		}
-		w.WriteHeader(http.StatusNoContent)
+		_ = json.NewEncoder(w).Encode(workerapi.HeartbeatResponse{CancelAttempts: []uuid.UUID{cancel}})
 	}))
 	defer srv.Close()
 
-	err := NewClient(srv.URL, clientToken).Heartbeat(t.Context(), id, workerapi.HeartbeatRequest{CPUUsedPercent: 50, MemoryUsedMB: 10})
+	resp, err := NewClient(srv.URL, clientToken).Heartbeat(t.Context(), id, workerapi.HeartbeatRequest{CPUUsedPercent: 50, MemoryUsedMB: 10})
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
+	}
+	if len(resp.CancelAttempts) != 1 || resp.CancelAttempts[0] != cancel {
+		t.Errorf("cancel attempts = %v", resp.CancelAttempts)
+	}
+}
+
+func TestClientLogs(t *testing.T) {
+	workerID, attemptID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	var got workerapi.LogsRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != workerapi.AttemptPath(workerID, attemptID, workerapi.ActionLogs) {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_ = json.NewEncoder(w).Encode(workerapi.LogsResponse{Truncated: true})
+	}))
+	defer srv.Close()
+
+	resp, err := NewClient(srv.URL, clientToken).Logs(t.Context(), workerID, attemptID, workerapi.LogsRequest{
+		Chunks: []workerapi.LogChunk{{Seq: 4, Stream: workerapi.StreamStderr, Data: []byte{0, 1, 0xff}}},
+	})
+	if err != nil || !resp.Truncated {
+		t.Fatalf("Logs: %+v, err %v", resp, err)
+	}
+	if len(got.Chunks) != 1 || got.Chunks[0].Seq != 4 || string(got.Chunks[0].Data) != "\x00\x01\xff" {
+		t.Errorf("server received %+v", got)
 	}
 }
 
@@ -145,7 +172,7 @@ func TestClientErrors(t *testing.T) {
 	t.Run("heartbeat 404 is ErrUnknownWorker", func(t *testing.T) {
 		srv := problemServer(http.StatusNotFound, "worker is not registered")
 		defer srv.Close()
-		err := NewClient(srv.URL, clientToken).Heartbeat(t.Context(), uuid.Must(uuid.NewV7()), workerapi.HeartbeatRequest{})
+		_, err := NewClient(srv.URL, clientToken).Heartbeat(t.Context(), uuid.Must(uuid.NewV7()), workerapi.HeartbeatRequest{})
 		if !errors.Is(err, ErrUnknownWorker) {
 			t.Fatalf("err = %v, want ErrUnknownWorker", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,8 +102,11 @@ func TestHeartbeat(t *testing.T) {
 	body := `{"cpu_used_percent":37.5,"memory_used_mb":2048}`
 	rec := serve(t, newTestRouter(store, nil), http.MethodPost, workerapi.HeartbeatPath(id), body, testToken)
 
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusNoContent, rec.Body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"cancel_attempts":[]}` {
+		t.Errorf("body = %s, want an empty cancel list", got)
 	}
 	if len(store.heartbeats) != 1 {
 		t.Fatalf("heartbeats = %d, want 1", len(store.heartbeats))
@@ -110,6 +114,21 @@ func TestHeartbeat(t *testing.T) {
 	got := store.heartbeats[0]
 	if got.ID != id || *got.CpuUsedPercent != 37.5 || *got.MemoryUsedMB != 2048 {
 		t.Errorf("heartbeat = id %s cpu %v mem %v", got.ID, *got.CpuUsedPercent, *got.MemoryUsedMB)
+	}
+}
+
+func TestHeartbeatListsCancelledAttempts(t *testing.T) {
+	attempt := uuid.Must(uuid.NewV7())
+	store := &fakeWorkerStore{heartbeatRows: 1, cancel: []uuid.UUID{attempt}}
+	rec := serve(t, newTestRouter(store, nil), http.MethodPost, workerapi.HeartbeatPath(uuid.Must(uuid.NewV7())),
+		`{"cpu_used_percent":1,"memory_used_mb":1}`, testToken)
+
+	var resp workerapi.HeartbeatResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("status %d, err %v", rec.Code, err)
+	}
+	if len(resp.CancelAttempts) != 1 || resp.CancelAttempts[0] != attempt {
+		t.Errorf("cancel attempts = %v", resp.CancelAttempts)
 	}
 }
 

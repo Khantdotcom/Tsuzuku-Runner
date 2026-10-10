@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"reflect"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/Khantdotcom/tsuzuku-runner/internal/artifact"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
@@ -158,15 +160,54 @@ type ListParams struct {
 	Limit  int32
 }
 
+// DefaultMaxLogBytes is how much output an attempt may store when no limit
+// is configured.
+const DefaultMaxLogBytes = 10 << 20
+
 // Service reads and submits jobs.
 type Service struct {
-	pool *pgxpool.Pool
-	q    *db.Queries
+	pool        *pgxpool.Pool
+	q           *db.Queries
+	artifacts   artifact.Store
+	maxLogBytes int64
+	logger      *slog.Logger
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// WithArtifacts stores finished attempts' logs in st. Without it, logs stay
+// only in the database.
+func WithArtifacts(st artifact.Store) Option {
+	return func(s *Service) { s.artifacts = st }
+}
+
+// WithMaxLogBytes limits how much output one attempt may store.
+func WithMaxLogBytes(n int64) Option {
+	return func(s *Service) {
+		if n > 0 {
+			s.maxLogBytes = n
+		}
+	}
+}
+
+// WithLogger reports best-effort work, such as storing artifacts, to l.
+func WithLogger(l *slog.Logger) Option {
+	return func(s *Service) { s.logger = l }
 }
 
 // NewService returns a Service backed by pool.
-func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, q: db.New(pool)}
+func NewService(pool *pgxpool.Pool, opts ...Option) *Service {
+	s := &Service{
+		pool:        pool,
+		q:           db.New(pool),
+		maxLogBytes: DefaultMaxLogBytes,
+		logger:      slog.New(slog.DiscardHandler),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Submit stores spec as a workload with a QUEUED job, its first transition,

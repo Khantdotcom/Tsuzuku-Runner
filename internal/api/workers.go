@@ -37,6 +37,7 @@ type WorkerStore interface {
 	RecordHeartbeat(ctx context.Context, arg db.RecordHeartbeatParams) (int64, error)
 	ListWorkers(ctx context.Context) ([]db.ListWorkersRow, error)
 	WorkerExists(ctx context.Context, id uuid.UUID) (bool, error)
+	ListCancelRequestedAttempts(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // workerView is the public representation of a worker.
@@ -122,7 +123,12 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "worker is not registered")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	cancel, err := s.workers.ListCancelRequestedAttempts(r.Context(), id)
+	if err != nil {
+		s.internalError(w, r, "list cancelled attempts", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workerapi.HeartbeatResponse{CancelAttempts: cancel})
 }
 
 func (s *server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +190,12 @@ func validateHeartbeat(req workerapi.HeartbeatRequest) error {
 // unknown fields are rejected so that a misspelled field is not silently
 // ignored. On failure it writes a 400 response and returns false.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any, strict bool) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	return decodeJSONLimit(w, r, v, strict, maxBodyBytes)
+}
+
+// decodeJSONLimit is decodeJSON with a body limit of limit bytes.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, strict bool, limit int64) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	if strict {
 		dec.DisallowUnknownFields()
 	}

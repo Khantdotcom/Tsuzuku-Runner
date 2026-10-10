@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -64,10 +65,11 @@ func (s *Service) Executing(ctx context.Context, workerID, attemptID uuid.UUID, 
 	})
 }
 
-// Verifying records how the workload command ended. A command that timed out
-// fails the job straight away and verify is false; otherwise the job moves to
-// VERIFYING and verify is true.
+// Verifying records how the workload command ended. If the job was asked to
+// stop, or the command timed out, the attempt ends here and verify is false;
+// otherwise the job moves to VERIFYING and verify is true.
 func (s *Service) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.VerifyingRequest) (verify bool, err error) {
+	var ended *db.JobAttempt
 	err = store.WithTx(ctx, s.pool, func(q *db.Queries) error {
 		a, err := lockAttempt(ctx, q, workerID, attemptID)
 		if err != nil {
@@ -83,10 +85,20 @@ func (s *Service) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, 
 		if err := q.RecordAttemptExit(ctx, db.RecordAttemptExitParams{ID: a.ID, ExitCode: &code}); err != nil {
 			return fmt.Errorf("record exit code: %w", err)
 		}
+		j, err := q.GetJob(ctx, a.JobID)
+		if err != nil {
+			return fmt.Errorf("load job: %w", err)
+		}
 
-		if exec.TimedOut {
-			reason := fmt.Sprintf("timed out after %s", durationText(exec.DurationMS))
-			return endAttempt(ctx, q, a, Executing, Failed, AttemptFailed, reason)
+		switch {
+		case j.CancelRequestedAt != nil:
+			ended = &a
+			return endAttempt(ctx, q, a, Executing, cancelledOnRequest())
+		case exec.TimedOut:
+			ended = &a
+			o := failed("timed out after "+durationText(exec.DurationMS), CategoryTimeout)
+			o.details = map[string]any{"duration_ms": exec.DurationMS}
+			return endAttempt(ctx, q, a, Executing, o)
 		}
 		_, err = Transition(ctx, q, Change{
 			JobID:     a.JobID,
@@ -100,20 +112,33 @@ func (s *Service) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, 
 		verify = err == nil
 		return err
 	})
+	if err == nil && ended != nil {
+		s.archiveLogs(ctx, *ended)
+	}
 	return verify, err
 }
 
 // Finish ends an attempt and moves its job to a final state. A cancelled or
 // errored attempt ends the job from whatever state it reached; otherwise the
 // job must be VERIFYING and the outcome follows from the recorded results.
+// A job that was asked to stop always ends CANCELLED.
 func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.FinishRequest) error {
-	return store.WithTx(ctx, s.pool, func(q *db.Queries) error {
+	var ended db.JobAttempt
+	err := store.WithTx(ctx, s.pool, func(q *db.Queries) error {
 		a, err := lockAttempt(ctx, q, workerID, attemptID)
 		if err != nil {
 			return err
 		}
+		ended = a
 		if req.Runtime != nil {
 			if err := recordRuntime(ctx, q, a, *req.Runtime, nil); err != nil {
+				return err
+			}
+		}
+		if v := req.Verification; v != nil {
+			if err := recordRuntime(ctx, q, a, v.Runtime, map[string]any{
+				"exit_code": v.Result.ExitCode, "timed_out": v.Result.TimedOut,
+			}); err != nil {
 				return err
 			}
 		}
@@ -124,44 +149,111 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 		from := State(j.State)
 
 		switch {
+		case j.CancelRequestedAt != nil:
+			return endAttempt(ctx, q, a, from, cancelledOnRequest())
 		case req.Cancelled:
-			return endAttempt(ctx, q, a, from, Cancelled, AttemptCancelled, "cancelled while "+string(from))
+			return endAttempt(ctx, q, a, from, outcome{
+				to: Cancelled, status: AttemptCancelled, reason: "cancelled while " + string(from),
+			})
 		case req.Error != "":
-			return endAttempt(ctx, q, a, from, Failed, AttemptFailed, truncate(req.Error, maxReasonLen))
+			o := failed(truncate(req.Error, maxReasonLen), stageCategory(req.Stage))
+			if req.Stage != "" {
+				o.details = map[string]any{"stage": req.Stage}
+			}
+			return endAttempt(ctx, q, a, from, o)
 		case from != Verifying:
 			return fmt.Errorf("%w: job %d is %s, not %s", ErrConflict, j.Number, from, Verifying)
 		}
-		to, status, reason := decide(a.ExitCode)
-		return endAttempt(ctx, q, a, from, to, status, reason)
+
+		w, err := q.GetWorkload(ctx, j.WorkloadID)
+		if err != nil {
+			return fmt.Errorf("load workload: %w", err)
+		}
+		v := judge(a.ExitCode, w.VerificationCommand, req.Verification)
+		if err := recordVerification(ctx, q, a, v); err != nil {
+			return err
+		}
+		return endAttempt(ctx, q, a, from, v.outcome)
 	})
-}
-
-// decide turns the recorded results of an attempt into its outcome.
-func decide(exitCode *int32) (to State, attemptStatus, reason string) {
-	switch {
-	case exitCode == nil:
-		return Failed, AttemptFailed, "no exit code was recorded"
-	case *exitCode != 0:
-		return Failed, AttemptFailed, fmt.Sprintf("command exited with code %d", *exitCode)
-	default:
-		return Completed, AttemptSucceeded, "command succeeded"
+	if err == nil {
+		s.archiveLogs(ctx, ended)
 	}
+	return err
 }
 
-// endAttempt moves the job to a final state and closes the attempt with the
-// matching status, in the caller's transaction.
-func endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from, to State, status, reason string) error {
+func cancelledOnRequest() outcome {
+	return outcome{to: Cancelled, status: AttemptCancelled, reason: "cancelled on request"}
+}
+
+// endAttempt moves the job to a final state, closes the attempt with the
+// matching status, and records the failure if there is one, in the caller's
+// transaction.
+func endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from State, o outcome) error {
 	if _, err := Transition(ctx, q, Change{
-		JobID: a.JobID, From: from, To: to, Actor: ActorWorker, Reason: reason, AttemptID: &a.ID,
+		JobID: a.JobID, From: from, To: o.to, Actor: ActorWorker, Reason: o.reason, AttemptID: &a.ID,
+		Details: o.details,
 	}); err != nil {
 		return err
 	}
 	var errText *string
-	if status != AttemptSucceeded {
-		errText = &reason
+	if o.status != AttemptSucceeded {
+		errText = &o.reason
 	}
-	if _, err := q.FinishAttempt(ctx, db.FinishAttemptParams{ID: a.ID, Status: status, Error: errText}); err != nil {
+	if _, err := q.FinishAttempt(ctx, db.FinishAttemptParams{ID: a.ID, Status: o.status, Error: errText}); err != nil {
 		return fmt.Errorf("finish attempt: %w", err)
+	}
+	if o.category == "" {
+		return nil
+	}
+	details, err := json.Marshal(o.details)
+	if err != nil {
+		return err
+	}
+	if o.details == nil {
+		details = []byte("{}")
+	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	if err := q.CreateFailure(ctx, db.CreateFailureParams{
+		ID: id, JobID: a.JobID, AttemptID: &a.ID, Category: o.category, Message: o.reason, Details: details,
+	}); err != nil {
+		return fmt.Errorf("record failure: %w", err)
+	}
+	return nil
+}
+
+// recordVerification stores a verification run and its checks.
+func recordVerification(ctx context.Context, q *db.Queries, a db.JobAttempt, v verdict) error {
+	runID, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	started := now
+	for _, c := range v.checks {
+		if c.startedAt != nil && c.startedAt.Before(started) {
+			started = *c.startedAt
+		}
+	}
+	if _, err := q.CreateVerificationRun(ctx, db.CreateVerificationRunParams{
+		ID: runID, JobID: a.JobID, AttemptID: a.ID, Status: v.runStatus, StartedAt: started, FinishedAt: &now,
+	}); err != nil {
+		return fmt.Errorf("record verification run: %w", err)
+	}
+	for _, c := range v.checks {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		if err := q.CreateVerificationCheck(ctx, db.CreateVerificationCheckParams{
+			ID: id, VerificationRunID: runID, Name: c.name, Kind: c.kind, Command: c.command,
+			Status: c.status, ExitCode: c.exitCode, Output: c.output,
+			StartedAt: c.startedAt, FinishedAt: c.finishedAt,
+		}); err != nil {
+			return fmt.Errorf("record %s check: %w", c.name, err)
+		}
 	}
 	return nil
 }

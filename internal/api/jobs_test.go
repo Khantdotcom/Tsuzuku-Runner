@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +43,42 @@ type fakeJobService struct {
 	chunks   []db.LogChunk
 	afters   []int64
 	limits   []int32
+
+	cancelImmediate bool
+	cancelErr       error
+	cancels         int
+	evidence        job.Evidence
+	artifacts       []db.Artifact
+	artifact        db.Artifact
+	content         string
+	openErr         error
+}
+
+func (f *fakeJobService) Cancel(_ context.Context, _ uuid.UUID) (db.Job, bool, error) {
+	f.cancels++
+	j := f.job
+	if f.cancelImmediate {
+		j.State = "CANCELLED"
+	} else {
+		now := time.Now()
+		j.CancelRequestedAt = &now
+	}
+	return j, f.cancelImmediate, f.cancelErr
+}
+
+func (f *fakeJobService) Evidence(context.Context, uuid.UUID) (job.Evidence, error) {
+	return f.evidence, nil
+}
+
+func (f *fakeJobService) Artifacts(context.Context, uuid.UUID) ([]db.Artifact, error) {
+	return f.artifacts, nil
+}
+
+func (f *fakeJobService) OpenArtifact(context.Context, uuid.UUID, uuid.UUID) (db.Artifact, io.ReadCloser, error) {
+	if f.openErr != nil {
+		return db.Artifact{}, nil, f.openErr
+	}
+	return f.artifact, io.NopCloser(strings.NewReader(f.content)), nil
 }
 
 func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string) (job.Submission, error) {

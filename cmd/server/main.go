@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/artifact"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
@@ -44,7 +45,17 @@ func run() error {
 	}
 	defer pool.Close()
 
-	jobs := job.NewService(pool)
+	artifacts, err := artifact.NewFS(cfg.ArtifactDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = artifacts.Close() }()
+
+	jobs := job.NewService(pool,
+		job.WithArtifacts(artifacts),
+		job.WithMaxLogBytes(cfg.MaxLogBytes),
+		job.WithLogger(logger),
+	)
 	assignments := scheduler.NewNotifier()
 	stopping := make(chan struct{})
 

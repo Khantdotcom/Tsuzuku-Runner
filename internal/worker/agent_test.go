@@ -38,6 +38,8 @@ type fakeAPI struct {
 	registers        []workerapi.RegisterRequest
 	ids              []uuid.UUID
 	heartbeats       []heartbeatCall
+	// cancel is returned with every heartbeat.
+	cancel []uuid.UUID
 }
 
 func (f *fakeAPI) Register(_ context.Context, req workerapi.RegisterRequest) (workerapi.RegisterResponse, error) {
@@ -52,14 +54,35 @@ func (f *fakeAPI) Register(_ context.Context, req workerapi.RegisterRequest) (wo
 	return workerapi.RegisterResponse{ID: id, Name: req.Name}, nil
 }
 
-func (f *fakeAPI) Heartbeat(_ context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) error {
+func (f *fakeAPI) Heartbeat(_ context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) (workerapi.HeartbeatResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heartbeats = append(f.heartbeats, heartbeatCall{id: id, req: req})
 	if f.unknownOn[len(f.heartbeats)] {
-		return ErrUnknownWorker
+		return workerapi.HeartbeatResponse{}, ErrUnknownWorker
 	}
-	return nil
+	return workerapi.HeartbeatResponse{CancelAttempts: f.cancel}, nil
+}
+
+// cancelRunner is a JobRunner that records cancellations.
+type cancelRunner struct {
+	mu        sync.Mutex
+	cancelled []uuid.UUID
+}
+
+func (*cancelRunner) Run(context.Context, uuid.UUID, workerapi.ClaimResponse) {}
+
+func (c *cancelRunner) Cancel(id uuid.UUID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancelled = append(c.cancelled, id)
+	return true
+}
+
+func (c *cancelRunner) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.cancelled)
 }
 
 func (f *fakeAPI) snapshot() (registers int, ids []uuid.UUID, heartbeats []heartbeatCall) {
@@ -180,6 +203,29 @@ func TestAgentStopsWhileRegistering(t *testing.T) {
 		return n >= 3
 	})
 	stop()
+}
+
+func TestAgentPassesCancellationsToRunner(t *testing.T) {
+	attempt := uuid.New()
+	api := &fakeAPI{cancel: []uuid.UUID{attempt}}
+	runner := &cancelRunner{}
+	agent := NewAgent(api, fakeProbe{}, slog.New(slog.DiscardHandler), Options{
+		Name: "test-worker", Slots: 1, HeartbeatInterval: 5 * time.Millisecond, Runner: runner,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- agent.Run(ctx) }()
+
+	waitFor(t, "two cancellations", func() bool { return runner.count() >= 2 })
+	cancel()
+	<-done
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for _, id := range runner.cancelled {
+		if id != attempt {
+			t.Errorf("cancelled %s, want %s", id, attempt)
+		}
+	}
 }
 
 func TestNewAgentDefaultsBackoff(t *testing.T) {

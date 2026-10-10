@@ -95,12 +95,21 @@ func (c *Client) Register(ctx context.Context, req workerapi.RegisterRequest) (w
 }
 
 // Heartbeat reports that the worker is alive along with current host usage.
-func (c *Client) Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) error {
-	err := c.post(ctx, workerapi.HeartbeatPath(id), req, http.StatusNoContent, nil)
+// The response lists running attempts the worker should stop.
+func (c *Client) Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) (workerapi.HeartbeatResponse, error) {
+	var resp workerapi.HeartbeatResponse
+	err := c.post(ctx, workerapi.HeartbeatPath(id), req, http.StatusOK, &resp)
 	if apiErr, ok := errors.AsType[*APIError](err); ok && apiErr.Status == http.StatusNotFound {
-		return ErrUnknownWorker
+		return resp, ErrUnknownWorker
 	}
-	return err
+	return resp, err
+}
+
+// Logs uploads a batch of an attempt's output.
+func (c *Client) Logs(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.LogsRequest) (workerapi.LogsResponse, error) {
+	var resp workerapi.LogsResponse
+	err := c.post(ctx, workerapi.AttemptPath(workerID, attemptID, workerapi.ActionLogs), req, http.StatusOK, &resp)
+	return resp, err
 }
 
 // Executing reports that the repository is checked out and the command is

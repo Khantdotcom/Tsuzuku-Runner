@@ -24,8 +24,17 @@ type fakeAttempts struct {
 	executing []workerapi.ExecutingRequest
 	verifying []workerapi.VerifyingRequest
 	finished  []workerapi.FinishRequest
+	logs      [][]workerapi.LogChunk
 	verify    bool
+	truncated bool
 	err       error
+}
+
+func (f *fakeAttempts) AppendLogs(_ context.Context, _, _ uuid.UUID, chunks []workerapi.LogChunk) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logs = append(f.logs, chunks)
+	return f.truncated, f.err
 }
 
 func (f *fakeAttempts) Executing(_ context.Context, _, _ uuid.UUID, req workerapi.ExecutingRequest) error {
@@ -52,7 +61,7 @@ func (f *fakeAttempts) Finish(_ context.Context, _, _ uuid.UUID, req workerapi.F
 func (f *fakeAttempts) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.executing) + len(f.verifying) + len(f.finished)
+	return len(f.executing) + len(f.verifying) + len(f.finished) + len(f.logs)
 }
 
 func attemptsRouter(f *fakeAttempts) http.Handler {
@@ -222,6 +231,127 @@ func TestAttemptValidation(t *testing.T) {
 			decodeProblem(t, rec)
 			if f.calls() != 0 {
 				t.Error("service called for an invalid request")
+			}
+		})
+	}
+}
+
+func TestAttemptLogs(t *testing.T) {
+	for _, truncated := range []bool{false, true} {
+		t.Run(fmt.Sprint(truncated), func(t *testing.T) {
+			f := &fakeAttempts{truncated: truncated}
+			body := mustJSON(t, workerapi.LogsRequest{Chunks: []workerapi.LogChunk{
+				{Seq: 0, Stream: workerapi.StreamStdout, Data: []byte("hello\n")},
+				{Seq: 1, Stream: workerapi.StreamStderr, Data: []byte{0xff, 0x00}},
+			}})
+			rec := serve(t, attemptsRouter(f), http.MethodPost, attemptPath(workerapi.ActionLogs), body, testToken)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body)
+			}
+			var resp workerapi.LogsResponse
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil || resp.Truncated != truncated {
+				t.Errorf("response = %+v, err %v", resp, err)
+			}
+			if len(f.logs) != 1 || len(f.logs[0]) != 2 || string(f.logs[0][1].Data) != "\xff\x00" {
+				t.Errorf("stored = %+v", f.logs)
+			}
+		})
+	}
+}
+
+func TestAttemptLogsAcceptsAFullBatch(t *testing.T) {
+	chunks := make([]workerapi.LogChunk, 0, 4)
+	for i := range 4 {
+		chunks = append(chunks, workerapi.LogChunk{Seq: i, Stream: workerapi.StreamStdout, Data: make([]byte, workerapi.MaxLogBatchBytes/4)})
+	}
+	f := &fakeAttempts{}
+	rec := serve(t, attemptsRouter(f), http.MethodPost, attemptPath(workerapi.ActionLogs),
+		mustJSON(t, workerapi.LogsRequest{Chunks: chunks}), testToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; a full batch must fit the body limit: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestAttemptLogsValidation(t *testing.T) {
+	logs := func(chunks ...workerapi.LogChunk) string {
+		return mustJSON(t, workerapi.LogsRequest{Chunks: chunks})
+	}
+	tooMany := make([]workerapi.LogChunk, workerapi.MaxLogBatchChunks+1)
+	for i := range tooMany {
+		tooMany[i] = workerapi.LogChunk{Seq: i, Stream: workerapi.StreamStdout}
+	}
+	tests := []struct {
+		name, body string
+	}{
+		{"no chunks", `{"chunks":[]}`},
+		{"too many chunks", logs(tooMany...)},
+		{"negative seq", logs(workerapi.LogChunk{Seq: -1, Stream: workerapi.StreamStdout})},
+		{"huge seq", `{"chunks":[{"seq":4294967296,"stream":"stdout","data":""}]}`},
+		{"unknown stream", logs(workerapi.LogChunk{Stream: "stdin"})},
+		{"too much output", logs(
+			workerapi.LogChunk{Seq: 0, Stream: workerapi.StreamStdout, Data: make([]byte, workerapi.MaxLogBatchBytes)},
+			workerapi.LogChunk{Seq: 1, Stream: workerapi.StreamStdout, Data: []byte("x")},
+		)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeAttempts{}
+			rec := serve(t, attemptsRouter(f), http.MethodPost, attemptPath(workerapi.ActionLogs), tt.body, testToken)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body)
+			}
+			decodeProblem(t, rec)
+			if f.calls() != 0 {
+				t.Error("service called for an invalid batch")
+			}
+		})
+	}
+}
+
+func TestAttemptFinishWithVerification(t *testing.T) {
+	f := &fakeAttempts{}
+	body := mustJSON(t, workerapi.FinishRequest{Verification: &workerapi.VerificationResult{
+		Command:    "make lint",
+		Result:     workerapi.StepResult{ExitCode: 2, DurationMS: 1500},
+		Runtime:    testRuntime(workerapi.RoleVerify),
+		OutputTail: "lint failed",
+	}})
+	rec := serve(t, attemptsRouter(f), http.MethodPost, attemptPath(workerapi.ActionFinish), body, testToken)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body)
+	}
+	if len(f.finished) != 1 || f.finished[0].Verification == nil || f.finished[0].Verification.Result.ExitCode != 2 {
+		t.Errorf("finish = %+v", f.finished)
+	}
+}
+
+func TestAttemptFinishValidation(t *testing.T) {
+	verification := func(change func(*workerapi.VerificationResult)) string {
+		v := workerapi.VerificationResult{Command: "make lint", Runtime: testRuntime(workerapi.RoleVerify)}
+		change(&v)
+		return mustJSON(t, workerapi.FinishRequest{Verification: &v})
+	}
+	tests := []struct {
+		name, body string
+	}{
+		{"stage without error", `{"stage":"checkout"}`},
+		{"unknown stage", `{"error":"x","stage":"lunch"}`},
+		{"wrong verification role", verification(func(v *workerapi.VerificationResult) { v.Runtime.Role = workerapi.RoleExecute })},
+		{"no verification command", verification(func(v *workerapi.VerificationResult) { v.Command = "" })},
+		{"bad verification exit code", verification(func(v *workerapi.VerificationResult) { v.Result.ExitCode = 999 })},
+		{"long output", verification(func(v *workerapi.VerificationResult) { v.OutputTail = strings.Repeat("x", maxOutputTail+1) })},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeAttempts{}
+			rec := serve(t, attemptsRouter(f), http.MethodPost, attemptPath(workerapi.ActionFinish), tt.body, testToken)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want 422; body = %s", rec.Code, rec.Body)
+			}
+			decodeProblem(t, rec)
+			if f.calls() != 0 {
+				t.Error("service called for an invalid finish")
 			}
 		})
 	}

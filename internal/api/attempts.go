@@ -23,6 +23,60 @@ type AttemptReporter interface {
 	Executing(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.ExecutingRequest) error
 	Verifying(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.VerifyingRequest) (bool, error)
 	Finish(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.FinishRequest) error
+	AppendLogs(ctx context.Context, workerID, attemptID uuid.UUID, chunks []workerapi.LogChunk) (bool, error)
+}
+
+const (
+	// maxLogsBodyBytes fits a full log batch after base64 encoding.
+	maxLogsBodyBytes = 256 << 10
+	maxOutputTail    = 16 << 10
+	maxCommandLen    = 4096
+)
+
+var validStages = map[string]bool{
+	workerapi.StageWorkspace: true, workerapi.StageImage: true, workerapi.StageCheckout: true,
+	workerapi.StageExecute: true, workerapi.StageVerify: true, workerapi.StageShutdown: true,
+}
+
+func (s *server) handleAttemptLogs(w http.ResponseWriter, r *http.Request) {
+	workerID, attemptID, ok := attemptParams(w, r)
+	if !ok {
+		return
+	}
+	var req workerapi.LogsRequest
+	if !decodeJSONLimit(w, r, &req, true, maxLogsBodyBytes) {
+		return
+	}
+	if err := validateLogs(req); err != nil {
+		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	truncated, err := s.attempts.AppendLogs(r.Context(), workerID, attemptID, req.Chunks)
+	if err != nil {
+		s.attemptError(w, r, "store logs", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, workerapi.LogsResponse{Truncated: truncated})
+}
+
+func validateLogs(req workerapi.LogsRequest) error {
+	if len(req.Chunks) == 0 || len(req.Chunks) > workerapi.MaxLogBatchChunks {
+		return fmt.Errorf("chunks must hold 1-%d chunks", workerapi.MaxLogBatchChunks)
+	}
+	total := 0
+	for i, c := range req.Chunks {
+		switch {
+		case c.Seq < 0 || c.Seq > math.MaxInt32:
+			return fmt.Errorf("chunks[%d].seq must be a non-negative 32-bit number", i)
+		case c.Stream != workerapi.StreamStdout && c.Stream != workerapi.StreamStderr:
+			return fmt.Errorf("chunks[%d].stream must be stdout or stderr", i)
+		}
+		total += len(c.Data)
+	}
+	if total > workerapi.MaxLogBatchBytes {
+		return fmt.Errorf("a batch may carry at most %d bytes of output", workerapi.MaxLogBatchBytes)
+	}
+	return nil
 }
 
 func (s *server) handleAttemptExecuting(w http.ResponseWriter, r *http.Request) {
@@ -89,8 +143,8 @@ func (s *server) handleAttemptFinish(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Cancelled && req.Error != "" {
-		writeProblem(w, r, http.StatusUnprocessableEntity, "set either cancelled or error, not both")
+	if err := validateFinish(req); err != nil {
+		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	if err := s.attempts.Finish(r.Context(), workerID, attemptID, req); err != nil {
@@ -143,6 +197,34 @@ func validateRuntime(rt workerapi.Runtime, role string) error {
 		return errors.New("runtime.memory_mb must be positive")
 	case rt.StartedAt.IsZero() || rt.FinishedAt.Before(rt.StartedAt):
 		return errors.New("runtime.started_at must be set and not after runtime.finished_at")
+	}
+	return nil
+}
+
+func validateFinish(req workerapi.FinishRequest) error {
+	switch {
+	case req.Cancelled && req.Error != "":
+		return errors.New("set either cancelled or error, not both")
+	case req.Stage != "" && req.Error == "":
+		return errors.New("stage is only allowed with error")
+	case req.Stage != "" && !validStages[req.Stage]:
+		return errors.New("stage must be workspace, image, checkout, execute, verify, or shutdown")
+	}
+	v := req.Verification
+	if v == nil {
+		return nil
+	}
+	if err := validateRuntime(v.Runtime, workerapi.RoleVerify); err != nil {
+		return fmt.Errorf("verification.%w", err)
+	}
+	if err := validateStep("verification.result", v.Result); err != nil {
+		return err
+	}
+	switch {
+	case v.Command == "" || len(v.Command) > maxCommandLen:
+		return fmt.Errorf("verification.command must be 1-%d bytes", maxCommandLen)
+	case len(v.OutputTail) > maxOutputTail:
+		return fmt.Errorf("verification.output_tail must be at most %d bytes", maxOutputTail)
 	}
 	return nil
 }

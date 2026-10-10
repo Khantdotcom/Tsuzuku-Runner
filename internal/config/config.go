@@ -72,7 +72,14 @@ type Server struct {
 	WorkerStaleAfter time.Duration `env:"TSUZUKU_WORKER_STALE_AFTER" envDefault:"15s"`
 	// SchedulerInterval is the time between scheduling rounds.
 	SchedulerInterval time.Duration `env:"TSUZUKU_SCHEDULER_INTERVAL" envDefault:"1s"`
+	// ArtifactDir is where job evidence files, such as logs, are stored.
+	ArtifactDir string `env:"TSUZUKU_ARTIFACT_DIR" envDefault:"./data/artifacts"`
+	// MaxLogBytes is how much output one attempt may store; the rest is dropped.
+	MaxLogBytes int64 `env:"TSUZUKU_MAX_LOG_BYTES" envDefault:"10485760"`
 }
+
+// minLogBytes keeps the log limit above a single upload batch.
+const minLogBytes = 64 << 10
 
 // Worker configures the worker process.
 type Worker struct {
@@ -132,6 +139,12 @@ func loadServer(environ map[string]string) (Server, error) {
 	}
 	if err := cfg.WorkloadLimits.validate(); err != nil {
 		return Server{}, err
+	}
+	if strings.TrimSpace(cfg.ArtifactDir) == "" {
+		return Server{}, errors.New("TSUZUKU_ARTIFACT_DIR must not be empty")
+	}
+	if cfg.MaxLogBytes < minLogBytes {
+		return Server{}, fmt.Errorf("TSUZUKU_MAX_LOG_BYTES must be at least %d, got %d", minLogBytes, cfg.MaxLogBytes)
 	}
 	return cfg, nil
 }

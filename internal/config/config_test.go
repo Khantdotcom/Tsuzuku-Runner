@@ -65,6 +65,22 @@ func TestLoadServerDefaults(t *testing.T) {
 	if cfg.SchedulerInterval != time.Second {
 		t.Errorf("SchedulerInterval = %s, want 1s", cfg.SchedulerInterval)
 	}
+	if cfg.ArtifactDir != "./data/artifacts" || cfg.MaxLogBytes != 10<<20 {
+		t.Errorf("ArtifactDir = %q, MaxLogBytes = %d", cfg.ArtifactDir, cfg.MaxLogBytes)
+	}
+}
+
+func TestLoadServerEvidenceSettings(t *testing.T) {
+	cfg, err := loadServer(serverEnv(map[string]string{
+		"TSUZUKU_ARTIFACT_DIR":  "/var/lib/tsuzuku/artifacts",
+		"TSUZUKU_MAX_LOG_BYTES": "1048576",
+	}))
+	if err != nil {
+		t.Fatalf("loadServer: %v", err)
+	}
+	if cfg.ArtifactDir != "/var/lib/tsuzuku/artifacts" || cfg.MaxLogBytes != 1<<20 {
+		t.Errorf("ArtifactDir = %q, MaxLogBytes = %d", cfg.ArtifactDir, cfg.MaxLogBytes)
+	}
 }
 
 func TestLoadServerWorkloadLimits(t *testing.T) {
@@ -133,6 +149,9 @@ func TestLoadServerRejectsInvalidValues(t *testing.T) {
 		{"huge timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "600000h"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
 		{"tiny scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "10ms"}), "TSUZUKU_SCHEDULER_INTERVAL"},
 		{"negative scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "-1s"}), "TSUZUKU_SCHEDULER_INTERVAL"},
+		{"blank artifact dir", serverEnv(map[string]string{"TSUZUKU_ARTIFACT_DIR": "  "}), "TSUZUKU_ARTIFACT_DIR"},
+		{"tiny log limit", serverEnv(map[string]string{"TSUZUKU_MAX_LOG_BYTES": "1000"}), "TSUZUKU_MAX_LOG_BYTES"},
+		{"bad log limit", serverEnv(map[string]string{"TSUZUKU_MAX_LOG_BYTES": "lots"}), "MaxLogBytes"},
 	}
 
 	for _, tt := range tests {

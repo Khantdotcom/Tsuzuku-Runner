@@ -26,7 +26,13 @@ const (
 // API is the part of the server API the agent uses. *Client implements it.
 type API interface {
 	Register(ctx context.Context, req workerapi.RegisterRequest) (workerapi.RegisterResponse, error)
-	Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) error
+	Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.HeartbeatRequest) (workerapi.HeartbeatResponse, error)
+}
+
+// Canceler stops a running attempt. A JobRunner that implements it receives
+// the cancellations the server sends with heartbeat responses.
+type Canceler interface {
+	Cancel(attemptID uuid.UUID) bool
 }
 
 // JobSource hands out the jobs assigned to a worker. *Client implements it.
@@ -123,9 +129,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 
-		err := a.heartbeat(ctx, id)
+		resp, err := a.heartbeat(ctx, id)
 		switch {
 		case err == nil:
+			a.cancelAttempts(ctx, resp.CancelAttempts)
 		case ctx.Err() != nil:
 			return nil
 		case errors.Is(err, ErrUnknownWorker):
@@ -240,9 +247,24 @@ func (a *Agent) tryRegister(ctx context.Context) (workerapi.RegisterResponse, er
 	})
 }
 
+// cancelAttempts stops the listed attempts if they run here. The server keeps
+// listing an attempt until it is reported, so a repeat is expected and
+// harmless.
+func (a *Agent) cancelAttempts(ctx context.Context, ids []uuid.UUID) {
+	c, ok := a.opts.Runner.(Canceler)
+	if !ok {
+		return
+	}
+	for _, id := range ids {
+		if c.Cancel(id) {
+			a.logger.InfoContext(ctx, "cancelling attempt on request", "attempt_id", id)
+		}
+	}
+}
+
 // heartbeat sends the latest usage sample. If sampling fails it reuses the
 // previous sample, since liveness matters more than fresh numbers.
-func (a *Agent) heartbeat(ctx context.Context, id uuid.UUID) error {
+func (a *Agent) heartbeat(ctx context.Context, id uuid.UUID) (workerapi.HeartbeatResponse, error) {
 	if usage, err := a.probe.Usage(ctx); err != nil {
 		a.logger.WarnContext(ctx, "sample host usage failed", "err", err)
 	} else {

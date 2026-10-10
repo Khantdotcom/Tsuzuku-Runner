@@ -87,6 +87,10 @@ func NewRouter(cfg Config) http.Handler {
 		r.Get("/jobs/{id}/attempts", s.handleListAttempts)
 		r.Get("/jobs/{id}/events", s.handleListEvents)
 		r.Get("/jobs/{id}/logs", s.handleListLogs)
+		r.Post("/jobs/{id}/cancel", s.handleCancelJob)
+		r.Get("/jobs/{id}/evidence", s.handleGetEvidence)
+		r.Get("/jobs/{id}/artifacts", s.handleListArtifacts)
+		r.Get("/jobs/{id}/artifacts/{artifactID}", s.handleDownloadArtifact)
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireWorkerToken(cfg.WorkerToken))
@@ -97,6 +101,7 @@ func NewRouter(cfg Config) http.Handler {
 				r.Post("/"+workerapi.ActionExecuting, s.handleAttemptExecuting)
 				r.Post("/"+workerapi.ActionVerifying, s.handleAttemptVerifying)
 				r.Post("/"+workerapi.ActionFinish, s.handleAttemptFinish)
+				r.Post("/"+workerapi.ActionLogs, s.handleAttemptLogs)
 			})
 		})
 	})

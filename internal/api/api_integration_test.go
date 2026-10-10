@@ -127,8 +127,12 @@ func TestWorkerLifecycle(t *testing.T) {
 	}
 
 	heartbeat := workerapi.HeartbeatRequest{CPUUsedPercent: 12.5, MemoryUsedMB: 512}
-	if status := post(t, srv.URL+workerapi.HeartbeatPath(reg.ID), heartbeat, nil); status != http.StatusNoContent {
+	var hb workerapi.HeartbeatResponse
+	if status := post(t, srv.URL+workerapi.HeartbeatPath(reg.ID), heartbeat, &hb); status != http.StatusOK {
 		t.Fatalf("heartbeat status = %d", status)
+	}
+	if hb.CancelAttempts == nil || len(hb.CancelAttempts) != 0 {
+		t.Errorf("heartbeat cancel attempts = %v, want an empty list", hb.CancelAttempts)
 	}
 
 	workers := listWorkers(t, srv.URL)

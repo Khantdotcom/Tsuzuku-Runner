@@ -20,19 +20,25 @@ import (
 const fakeCommit = "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d"
 
 type fakeRuntime struct {
-	mu         sync.Mutex
-	createErr  error
-	ensureErr  error
-	checkout   error
-	runErr     error
-	exitCode   int
-	timedOut   bool
-	blockRun   bool
-	images     []string
-	steps      []runtime.Step
-	repo, rev  string
-	removed    []runtime.Workspace
-	workspaces []runtime.Owner
+	mu        sync.Mutex
+	createErr error
+	ensureErr error
+	checkout  error
+	runErr    error
+	exitCode  int
+	timedOut  bool
+	blockRun  bool
+	// stdout and stderr are written by the execute step.
+	stdout, stderr string
+	// verifyErr, verifyExit, and verifyOutput shape the verify step.
+	verifyErr    error
+	verifyExit   int
+	verifyOutput string
+	images       []string
+	steps        []runtime.Step
+	repo, rev    string
+	removed      []runtime.Workspace
+	workspaces   []runtime.Owner
 }
 
 func (f *fakeRuntime) EnsureImage(_ context.Context, image string) error {
@@ -68,13 +74,23 @@ func (f *fakeRuntime) Checkout(_ context.Context, _ runtime.Workspace, repo, rev
 	return fakeCommit, res, nil
 }
 
-func (f *fakeRuntime) Run(ctx context.Context, _ runtime.Workspace, step runtime.Step, _, _ io.Writer) (runtime.Result, error) {
+func (f *fakeRuntime) Run(ctx context.Context, _ runtime.Workspace, step runtime.Step, stdout, stderr io.Writer) (runtime.Result, error) {
 	f.mu.Lock()
 	f.steps = append(f.steps, step)
 	block, runErr, code, timedOut := f.blockRun, f.runErr, f.exitCode, f.timedOut
+	out, errOut := f.stdout, f.stderr
+	if step.Role == workerapi.RoleVerify {
+		block, runErr, code, timedOut = false, f.verifyErr, f.verifyExit, false
+		out, errOut = f.verifyOutput, ""
+	}
 	f.mu.Unlock()
 
-	res := runtime.Result{Step: step, ContainerID: "execute-1", StartedAt: time.Now()}
+	res := runtime.Result{Step: step, ContainerID: step.Role + "-1", StartedAt: time.Now()}
+	if ctx.Err() != nil {
+		return res, ctx.Err()
+	}
+	_, _ = io.WriteString(stdout, out)
+	_, _ = io.WriteString(stderr, errOut)
 	if block {
 		<-ctx.Done()
 		return res, ctx.Err()
@@ -105,6 +121,30 @@ type fakeReporter struct {
 	verifying []workerapi.VerifyingRequest
 	finished  []workerapi.FinishRequest
 	finishCtx []error
+	logs      []workerapi.LogChunk
+}
+
+func (f *fakeReporter) Logs(_ context.Context, _, _ uuid.UUID, req workerapi.LogsRequest) (workerapi.LogsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(workerapi.ActionLogs); err != nil {
+		return workerapi.LogsResponse{}, err
+	}
+	f.logs = append(f.logs, req.Chunks...)
+	return workerapi.LogsResponse{}, nil
+}
+
+// output joins the uploaded chunks of stream.
+func (f *fakeReporter) output(stream string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var b strings.Builder
+	for _, c := range f.logs {
+		if c.Stream == stream {
+			b.Write(c.Data)
+		}
+	}
+	return b.String()
 }
 
 func (f *fakeReporter) fail(action string) error {
@@ -173,7 +213,7 @@ func newTestExecutor(rt runtime.Runtime, rep Reporter) *Executor {
 }
 
 func TestExecutorRunsAttempt(t *testing.T) {
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{stdout: "ok\n", stderr: "warning\n"}
 	rep := &fakeReporter{verify: true}
 	claim := testClaim()
 	workerID := uuid.New()
@@ -219,6 +259,103 @@ func TestExecutorRunsAttempt(t *testing.T) {
 	if len(rt.removed) != 1 {
 		t.Errorf("workspaces removed = %d, want 1", len(rt.removed))
 	}
+	if got := rep.output(workerapi.StreamStdout); got != "ok\n" {
+		t.Errorf("uploaded stdout = %q", got)
+	}
+	if got := rep.output(workerapi.StreamStderr); got != "warning\n" {
+		t.Errorf("uploaded stderr = %q", got)
+	}
+}
+
+func verifiedClaim(cmd string) workerapi.ClaimResponse {
+	c := testClaim()
+	c.Spec.Verification = &workload.Verification{Command: cmd}
+	return c
+}
+
+func TestExecutorRunsVerification(t *testing.T) {
+	rt := &fakeRuntime{verifyExit: 1, verifyOutput: "FAIL: lint\n"}
+	rep := &fakeReporter{verify: true}
+
+	newTestExecutor(rt, rep).Run(t.Context(), uuid.New(), verifiedClaim("make lint"))
+
+	if len(rt.steps) != 2 {
+		t.Fatalf("steps = %+v, want execute then verify", rt.steps)
+	}
+	vs := rt.steps[1]
+	if vs.Role != workerapi.RoleVerify || vs.Command != "make lint" || vs.Image != "golang:1.27" || vs.Timeout != 90*time.Second {
+		t.Errorf("verify step = %+v", vs)
+	}
+	if len(rep.finished) != 1 || rep.finished[0].Verification == nil {
+		t.Fatalf("finish = %+v, want a verification result", rep.finished)
+	}
+	v := rep.finished[0].Verification
+	if v.Command != "make lint" || v.Result.ExitCode != 1 || v.Result.TimedOut || v.Runtime.Role != workerapi.RoleVerify ||
+		v.OutputTail != "FAIL: lint" {
+		t.Errorf("verification = %+v", v)
+	}
+	if got := rep.output(workerapi.StreamStdout); strings.Contains(got, "FAIL") {
+		t.Errorf("verification output was uploaded as job output: %q", got)
+	}
+}
+
+func TestExecutorSkipsVerificationAfterFailedCommand(t *testing.T) {
+	rt := &fakeRuntime{exitCode: 2}
+	rep := &fakeReporter{verify: true}
+
+	newTestExecutor(rt, rep).Run(t.Context(), uuid.New(), verifiedClaim("make lint"))
+
+	if len(rt.steps) != 1 {
+		t.Errorf("steps = %+v, want only the command", rt.steps)
+	}
+	if len(rep.finished) != 1 || rep.finished[0] != (workerapi.FinishRequest{}) {
+		t.Errorf("finish = %+v, want an empty finish", rep.finished)
+	}
+}
+
+func TestExecutorCancelsOnRequest(t *testing.T) {
+	rt := &fakeRuntime{blockRun: true}
+	rep := &fakeReporter{verify: true}
+	exec := newTestExecutor(rt, rep)
+	claim := testClaim()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		exec.Run(t.Context(), uuid.New(), claim)
+	}()
+
+	waitFor(t, "the command to start", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return len(rt.steps) == 1
+	})
+	if exec.Cancel(uuid.New()) {
+		t.Error("Cancel stopped an attempt that is not running")
+	}
+	if !exec.Cancel(claim.AttemptID) {
+		t.Fatal("Cancel did not stop the running attempt")
+	}
+	if exec.Cancel(claim.AttemptID) {
+		t.Error("a repeated Cancel reported stopping the attempt again")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not stop after Cancel")
+	}
+
+	if len(rep.finished) != 1 || !rep.finished[0].Cancelled || rep.finished[0].Error != "" {
+		t.Fatalf("finish = %+v, want cancelled", rep.finished)
+	}
+	if rep.finishCtx[0] != nil {
+		t.Error("final report was sent with a cancelled context")
+	}
+	if len(rt.removed) != 1 {
+		t.Error("workspace not removed")
+	}
+	if exec.Cancel(claim.AttemptID) {
+		t.Error("Cancel found an attempt that already ended")
+	}
 }
 
 func TestExecutorStopsWhenServerEndsTheJob(t *testing.T) {
@@ -241,28 +378,34 @@ func TestExecutorStopsWhenServerEndsTheJob(t *testing.T) {
 func TestExecutorReportsInfrastructureFailures(t *testing.T) {
 	boom := errors.New("boom")
 	tests := []struct {
-		name        string
-		rt          *fakeRuntime
-		wantPrefix  string
-		wantRole    string
-		wantRemoved int
+		name          string
+		rt            *fakeRuntime
+		wantPrefix    string
+		wantStage     string
+		wantRole      string
+		wantRemoved   int
+		wantVerifying int
 	}{
-		{"workspace", &fakeRuntime{createErr: boom}, "create workspace: boom", "", 0},
-		{"image", &fakeRuntime{ensureErr: boom}, "pull image: boom", "", 1},
-		{"checkout", &fakeRuntime{checkout: runtime.ErrCheckoutFailed}, "check out repository: checkout failed", workerapi.RolePrepare, 1},
-		{"run", &fakeRuntime{runErr: boom}, "run command: boom", workerapi.RoleExecute, 1},
+		{"workspace", &fakeRuntime{createErr: boom}, "create workspace: boom", workerapi.StageWorkspace, "", 0, 0},
+		{"image", &fakeRuntime{ensureErr: boom}, "pull image: boom", workerapi.StageImage, "", 1, 0},
+		{
+			"checkout", &fakeRuntime{checkout: runtime.ErrCheckoutFailed}, "check out repository: checkout failed",
+			workerapi.StageCheckout, workerapi.RolePrepare, 1, 0,
+		},
+		{"run", &fakeRuntime{runErr: boom}, "run command: boom", workerapi.StageExecute, workerapi.RoleExecute, 1, 0},
+		{"verify", &fakeRuntime{verifyErr: boom}, "run verification: boom", workerapi.StageVerify, workerapi.RoleVerify, 1, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rep := &fakeReporter{verify: true}
-			newTestExecutor(tt.rt, rep).Run(t.Context(), uuid.New(), testClaim())
+			newTestExecutor(tt.rt, rep).Run(t.Context(), uuid.New(), verifiedClaim("make lint"))
 
 			if len(rep.finished) != 1 {
 				t.Fatalf("finish reports = %d, want 1", len(rep.finished))
 			}
 			fin := rep.finished[0]
-			if !strings.HasPrefix(fin.Error, tt.wantPrefix) || fin.Cancelled {
-				t.Errorf("finish = %+v, want error starting %q", fin, tt.wantPrefix)
+			if !strings.HasPrefix(fin.Error, tt.wantPrefix) || fin.Stage != tt.wantStage || fin.Cancelled {
+				t.Errorf("finish = %+v, want error starting %q at stage %s", fin, tt.wantPrefix, tt.wantStage)
 			}
 			switch {
 			case tt.wantRole == "" && fin.Runtime != nil:
@@ -272,8 +415,8 @@ func TestExecutorReportsInfrastructureFailures(t *testing.T) {
 			case fin.Runtime != nil && fin.Runtime.FinishedAt.Before(fin.Runtime.StartedAt):
 				t.Errorf("runtime finished before it started: %+v", fin.Runtime)
 			}
-			if len(rep.verifying) != 0 {
-				t.Error("verifying reported after a failure")
+			if len(rep.verifying) != tt.wantVerifying {
+				t.Errorf("verifying reports = %d, want %d", len(rep.verifying), tt.wantVerifying)
 			}
 			if len(tt.rt.removed) != tt.wantRemoved {
 				t.Errorf("workspaces removed = %d, want %d", len(tt.rt.removed), tt.wantRemoved)
@@ -304,7 +447,8 @@ func TestExecutorReportsShutdown(t *testing.T) {
 		t.Fatal("executor did not stop after cancellation")
 	}
 
-	if len(rep.finished) != 1 || rep.finished[0].Error != "worker stopped before the attempt finished" {
+	if len(rep.finished) != 1 || rep.finished[0].Error != "worker stopped before the attempt finished" ||
+		rep.finished[0].Stage != workerapi.StageShutdown || rep.finished[0].Cancelled {
 		t.Fatalf("finish = %+v", rep.finished)
 	}
 	if rep.finishCtx[0] != nil {

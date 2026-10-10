@@ -36,6 +36,15 @@ type fakeWorkerStore struct {
 	listErr       error
 	missing       bool
 	existsErr     error
+	cancel        []uuid.UUID
+	cancelErr     error
+}
+
+func (f *fakeWorkerStore) ListCancelRequestedAttempts(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	if f.cancel == nil {
+		return []uuid.UUID{}, f.cancelErr
+	}
+	return f.cancel, f.cancelErr
 }
 
 func (f *fakeWorkerStore) WorkerExists(context.Context, uuid.UUID) (bool, error) {

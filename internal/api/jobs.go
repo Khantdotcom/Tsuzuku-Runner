@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -31,6 +32,10 @@ type JobService interface {
 	Attempts(ctx context.Context, jobID uuid.UUID) ([]db.JobAttempt, error)
 	Events(ctx context.Context, jobID uuid.UUID, after int64, limit int32) ([]db.JobEvent, error)
 	Logs(ctx context.Context, jobID uuid.UUID, after int64, limit int32) ([]db.LogChunk, error)
+	Cancel(ctx context.Context, jobID uuid.UUID) (db.Job, bool, error)
+	Evidence(ctx context.Context, jobID uuid.UUID) (job.Evidence, error)
+	Artifacts(ctx context.Context, jobID uuid.UUID) ([]db.Artifact, error)
+	OpenArtifact(ctx context.Context, jobID, artifactID uuid.UUID) (db.Artifact, io.ReadCloser, error)
 }
 
 type jobView struct {
