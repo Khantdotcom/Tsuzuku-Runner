@@ -43,15 +43,26 @@ This starts PostgreSQL, applies migrations, then runs the API server, two worker
 - Dashboard: <http://localhost:3000>
 - API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`, `/api/v1/jobs`)
 
-Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container. The job ends `COMPLETED` when the command exits `0` and `FAILED` otherwise:
+Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container, then runs the verification command in the same workspace. The job ends `COMPLETED` only when both exit `0`, and `FAILED` otherwise:
 
 ```bash
 curl -i http://localhost:8080/api/v1/workloads \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: first-run' \
-  -d '{"repository":"https://github.com/octocat/Hello-World","revision":"master","command":"test -f README","runtime":{"image":"golang:1.27"}}'
+  -d '{"repository":"https://github.com/octocat/Hello-World","revision":"master","command":"cat README","verification":{"command":"grep -q Hello README"},"runtime":{"image":"golang:1.27"}}'
 curl 'http://localhost:8080/api/v1/jobs?limit=5'
 ```
+
+Follow a job by its number:
+
+```bash
+curl http://localhost:8080/api/v1/jobs/1/logs       # output so far (base64 chunks)
+curl http://localhost:8080/api/v1/jobs/1/evidence   # verification checks, failure category, artifacts
+curl -OJ http://localhost:8080/api/v1/jobs/1/artifacts/<artifact-id>   # stdout.log or stderr.log
+curl -X POST http://localhost:8080/api/v1/jobs/1/cancel
+```
+
+Cancelling a job that has not started ends it at once (`200`); a running job is stopped by its worker within one heartbeat (`202`).
 
 The workers start job containers through the host's Docker socket, so Compose runs them as root (see [ADR 0005](docs/adr/0005-docker-runtime.md)). The first job on a machine also pulls the job image and the git helper image.
 
@@ -102,7 +113,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task test:docker`      | Run unit and integration tests with `-race` in a Go container |
 | `task lint:docker` / `fe:docker` | Run golangci-lint, or the dashboard lint, typecheck, and build, in a container |
 | `task ci:docker`        | Run the full CI checks with only Docker on the host |
-| `task smoke`            | Build and start an isolated stack, check workers and readiness, run a passing and a failing job, then remove it |
+| `task smoke`            | Build and start an isolated stack, check workers and readiness, run passing, failing, unverified, and cancelled jobs and check their evidence, then remove it |
 
 The `:docker` variants need only Docker and Task. Use them where host toolchains can't run, for example on Windows when Smart App Control blocks freshly built test binaries, `gcc` is missing for `-race`, or `pnpm` is blocked.
 
@@ -110,14 +121,14 @@ The `:docker` variants need only Docker and Task. Use them where host toolchains
 
 ### Configuration
 
-All configuration comes from environment variables prefixed with `TSUZUKU_`. See [`.env.example`](.env.example) for the full list and defaults. The per-workload maximums (`TSUZUKU_WORKLOAD_MAX_CPU_MILLIS`, `TSUZUKU_WORKLOAD_MAX_MEMORY_MB`, `TSUZUKU_WORKLOAD_MAX_TIMEOUT`) default to 4 cores, 8 GiB, and one hour.
+All configuration comes from environment variables prefixed with `TSUZUKU_`. See [`.env.example`](.env.example) for the full list and defaults. The per-workload maximums (`TSUZUKU_WORKLOAD_MAX_CPU_MILLIS`, `TSUZUKU_WORKLOAD_MAX_MEMORY_MB`, `TSUZUKU_WORKLOAD_MAX_TIMEOUT`) default to 4 cores, 8 GiB, and one hour. Captured logs and other artifacts are written to `TSUZUKU_ARTIFACT_DIR` (`./data/artifacts` on the host, the `artifacts` volume in Compose), and each attempt keeps at most `TSUZUKU_MAX_LOG_BYTES` of output (10 MiB).
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
 - [Backend concepts](docs/concepts/): plain-English notes on the ideas behind the design
-- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency, and how [workloads run in locked-down containers](docs/adr/0005-docker-runtime.md)
+- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency, how [workloads run in locked-down containers](docs/adr/0005-docker-runtime.md), and where [logs and artifacts are stored](docs/adr/0006-evidence-storage.md)
 
 ## License
 

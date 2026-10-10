@@ -68,7 +68,7 @@ erDiagram
 | 00003     | `runtimes`            | Each container an attempt used (prepare, execute, verify) and its limits.                 |
 | 00003     | `leases`              | Time-bounded claim of a job by a worker.                                                  |
 | 00003     | `log_chunks`          | Raw stdout/stderr bytes, ordered by `seq` per attempt.                                    |
-| 00003     | `artifacts`           | Metadata for stored files (logs, patches, reports); content lives in object storage.      |
+| 00003     | `artifacts`           | Metadata for stored files (logs, patches, reports); content lives in the artifact store under `storage_key`. |
 | 00004     | `verification_runs`   | One verification pass over an attempt.                                                    |
 | 00004     | `verification_checks` | Individual checks within a run and their result.                                          |
 | 00004     | `failures`            | Classified failures (category plus message and details).                                  |
@@ -136,8 +136,30 @@ Every worker report about an attempt runs in one transaction that starts by lock
 | `RecordAttemptExit` | Stores the command's exit code on the attempt                                              |
 | `FinishAttempt`     | Sets the final attempt status, error, and `finished_at`; only matches a `RUNNING` attempt  |
 | `ListRuntimes`      | A job's containers across all attempts, oldest first                                       |
+| `AttemptLogBytes`   | Bytes already stored for an attempt, checked against the log limit before inserting        |
+| `InsertLogChunk`    | One chunk, `ON CONFLICT (attempt_id, seq) DO NOTHING`; reports whether a row was written    |
+| `ListAttemptLogChunks` | An attempt's chunks in `seq` order, joined into `stdout.log` and `stderr.log`           |
+| `CreateArtifact`    | Artifact metadata, `ON CONFLICT DO NOTHING`, so storing an attempt's logs twice is harmless |
+| `CreateVerificationRun`, `CreateVerificationCheck` | The verdict for an attempt and one row per check            |
+| `CreateFailure`     | The category, message, and details of a failed attempt                                     |
+| `RequestJobCancel`  | Sets `cancel_requested_at` on a `PREPARING`, `EXECUTING`, or `VERIFYING` job; keeps the first request's time |
+| `ListCancelRequestedAttempts` | A worker's running attempts whose job has a pending cancel, returned on every heartbeat |
 
-Locking the attempt serializes reports for the same attempt, so a retried report cannot race the original. The job's state still changes only through `job.Transition`, inside the same transaction: if the report is rejected, the runtime rows and events it wrote roll back with it.
+Locking the attempt serializes reports for the same attempt, so a retried report cannot race the original. The job's state still changes only through `job.Transition`, inside the same transaction: if the report is rejected, the runtime rows, checks, failure, and events it wrote roll back with it.
+
+The `verifying` and `finish` reports read `jobs.cancel_requested_at` under that lock. A request that arrived before either report is therefore always seen, and the attempt ends `CANCELLED` regardless of what the worker reported. The `executing` report does not check it: the job keeps running until the worker hears about the request on its next heartbeat.
+
+## Evidence paths
+
+| Query                    | Used for                                                       |
+| ------------------------ | -------------------------------------------------------------- |
+| `ListArtifacts`          | A job's artifacts, oldest first                                |
+| `GetArtifact`            | One artifact, matched on both its ID and its job's ID          |
+| `ListVerificationRuns`   | A job's verification runs                                      |
+| `ListVerificationChecks` | The checks of all of a job's runs, grouped by run in Go         |
+| `ListFailures`           | A job's classified failures                                    |
+
+Matching an artifact on its job as well as its ID means a URL cannot read another job's files by swapping the artifact ID.
 
 ## Local development
 

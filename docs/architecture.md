@@ -61,8 +61,9 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `GET /healthz`                        | none         | Liveness: the process is up                                |
 | `GET /readyz`                         | none         | Readiness: the database answers a ping within 2s           |
 | `POST /api/v1/workers/register`       | worker token | Register or re-register a worker; returns its ID           |
-| `POST /api/v1/workers/{id}/heartbeat` | worker token | Report liveness and host usage; `404` if the ID is unknown |
+| `POST /api/v1/workers/{id}/heartbeat` | worker token | Report liveness and host usage; returns attempts to cancel; `404` if the ID is unknown |
 | `POST /api/v1/workers/{id}/claim`     | worker token | Start the worker's next assigned job; long-polls with `?wait=` |
+| `POST /api/v1/workers/{id}/attempts/{aid}/{action}` | worker token | Attempt reports: `executing`, `logs`, `verifying`, `finish` |
 | `GET /api/v1/workers`                 | none         | List workers with capacity, usage, and online status       |
 | `POST /api/v1/workloads`              | none         | Submit a workload; creates a `QUEUED` job                  |
 | `GET /api/v1/jobs`                    | none         | List jobs newest first (`state`, `limit`, `before` cursor) |
@@ -70,6 +71,10 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `GET /api/v1/jobs/{id}/attempts`      | none         | Attempts in order                                          |
 | `GET /api/v1/jobs/{id}/events`        | none         | Timeline events after an `after` cursor                    |
 | `GET /api/v1/jobs/{id}/logs`          | none         | Log chunks after an `after` cursor (data is base64)        |
+| `POST /api/v1/jobs/{id}/cancel`       | none         | Cancel a job: `200` if it had not started, `202` if running, `409` if finished |
+| `GET /api/v1/jobs/{id}/evidence`      | none         | Artifacts, verification runs with their checks, and failures |
+| `GET /api/v1/jobs/{id}/artifacts`     | none         | Stored files with size, SHA-256, and a download URL        |
+| `GET /api/v1/jobs/{id}/artifacts/{artifact_id}` | none | Download one file                                       |
 
 Workers authenticate with a shared bearer token (`TSUZUKU_WORKER_TOKEN`), compared in constant time. Request and response types for the worker endpoints live in `internal/workerapi`, which both binaries import.
 
@@ -175,20 +180,86 @@ sequenceDiagram
     W->>A: POST .../attempts/{aid}/executing (commit)
     Note over A: PREPARING to EXECUTING
     W->>D: step container: sh -c "<command>"
+    loop every second, or every 64 KB of output
+        W->>A: POST .../attempts/{aid}/logs (numbered chunks)
+    end
     W->>A: POST .../attempts/{aid}/verifying (exit code, timed out)
     Note over A: EXECUTING to VERIFYING, or FAILED on timeout
-    W->>A: POST .../attempts/{aid}/finish
-    Note over A: VERIFYING to COMPLETED (exit 0) or FAILED
+    W->>D: verify container: sh -c "<verification.command>"
+    W->>A: POST .../attempts/{aid}/finish (verification result)
+    Note over A: checks recorded; VERIFYING to COMPLETED or FAILED
+    Note over A: stdout.log and stderr.log stored as artifacts
     W->>D: remove volume
 ```
 
-- **The worker reports facts; the server decides.** Reports carry the resolved commit, exit code, whether the step timed out, durations, and the container's image and limits. The server records each container in `runtimes` with an `attempt.runtime_finished` timeline event, then chooses the next state. A command that exits `0` completes the job; any other exit code, a timeout, or a failure outside the command (image pull, checkout, Docker error) fails it, with the reason in the history and on the attempt.
-- **Reports are fenced.** `POST /api/v1/workers/{id}/attempts/{attempt_id}/{executing|verifying|finish}` checks, under a row lock, that the attempt belongs to that worker (`404` otherwise) and is still running (`409` otherwise). A duplicate or late report changes nothing.
+- **The worker reports facts; the server decides.** Reports carry the resolved commit, exit codes, whether a step timed out, durations, and each container's image and limits. The server records each container in `runtimes` with an `attempt.runtime_finished` timeline event, then chooses the next state.
+- **Reports are fenced.** `POST /api/v1/workers/{id}/attempts/{attempt_id}/{executing|logs|verifying|finish}` checks, under a row lock, that the attempt belongs to that worker (`404` otherwise) and is still running (`409` otherwise). A duplicate or late report changes nothing.
 - **Retries.** The worker retries a report on network errors and `5xx` responses for up to a minute, and stops on any `4xx`, since the server has already decided.
 - **Shutdown.** On `SIGTERM` the worker kills its running containers and reports each attempt as failed ("worker stopped before the attempt finished") before exiting. Compose gives workers 30 seconds to do this.
 - **Isolation.** Step containers drop all capabilities, run with a read-only root filesystem and a size-capped `/tmp`, have hard memory, CPU, and process limits, see no host paths, and have no network unless the workload asks for it. See ADR 0005 for the full list.
 
-Verification (running `verification.command` and checking acceptance criteria), log streaming, artifacts, and cancellation of running jobs are added in the next slices; until then a job that reaches `VERIFYING` is decided by its exit code alone.
+## Verification and outcome
+
+When the command exits `0` and the workload has a `verification.command`, the worker runs it as a second container (role `verify`) in the same workspace, with the same image, limits, and timeout. It reports the exit code, whether it timed out, and the last 4 KB of its output. Verification output is kept on the check, not in the job's logs.
+
+The server turns the reported facts into a verification run with one check per rule, then the job's outcome:
+
+| Check          | Kind        | Passes when                    | Otherwise                                                    |
+| -------------- | ----------- | ------------------------------ | ------------------------------------------------------------ |
+| `exit_code`    | `exit_code` | the command exited `0`         | `FAILED`; `ERROR` if no exit code was recorded               |
+| `verification` | `command`   | the verification command exits `0` | `FAILED` on a non-zero exit or timeout; `SKIPPED` if the command failed; `ERROR` if the worker sent no result |
+
+The run is `PASSED` only if every check passed; any `ERROR` makes it `ERROR`, otherwise any failure makes it `FAILED`. The job is `COMPLETED` only when the run passed. Acceptance criteria are stored with the workload but are not evaluated yet.
+
+## Failures
+
+Every failed job gets a `failures` row with a category, a message, and details, so a failure can be filtered and explained without reading logs:
+
+| Cause                                         | Category         |
+| --------------------------------------------- | ---------------- |
+| Command or verification exited non-zero       | `TEST`           |
+| Command or verification timed out             | `TIMEOUT`        |
+| Image could not be pulled                     | `ENVIRONMENT`    |
+| Workspace, container, or Docker error; worker shutdown; missing result | `INFRASTRUCTURE` |
+| Checkout failed (bad revision or network)     | `UNKNOWN`        |
+
+Workers tag a failure outside the workload with the stage that failed (`workspace`, `image`, `checkout`, `execute`, `verify`, `shutdown`); the server maps the stage to a category. Cancelled jobs record no failure.
+
+## Logs and artifacts
+
+- **Streaming.** The worker splits command output into chunks of at most 16 KB, numbers them across both streams, and uploads a batch every second or as soon as 64 KB are waiting. Output is visible through `GET /jobs/{id}/logs` while the command runs. The worker uploads what remains before it reports the exit code, including after a cancellation.
+- **Exactly once.** Chunks are stored with `ON CONFLICT (attempt_id, seq) DO NOTHING`, so a batch resent after a lost response is stored once.
+- **Limits.** One attempt stores at most `TSUZUKU_MAX_LOG_BYTES` (10 MiB by default). The chunk that crosses the limit is cut, later output is dropped, an `attempt.logs_truncated` event is recorded, and the response tells the worker to stop sending. While the server is unreachable, a worker holds at most 4 MiB per attempt.
+- **Artifacts.** When an attempt ends, the server joins its chunks into `stdout.log` and `stderr.log`, writes them under `TSUZUKU_ARTIFACT_DIR`, and records each in `artifacts` with its size and SHA-256 ([ADR 0006](adr/0006-evidence-storage.md)). Files are written to a temporary name and renamed into place, and keys cannot leave the directory. Storing artifacts is best effort: the job's outcome is already committed, and the chunks stay readable from the logs endpoint.
+- **Download.** `GET /jobs/{id}/artifacts/{artifact_id}` serves a file as an attachment with its SHA-256 as the `ETag`.
+
+## Cancellation
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API server
+    participant W as Worker
+    participant D as Docker
+    C->>A: POST /jobs/{id}/cancel
+    alt QUEUED or SCHEDULED
+        Note over A: to CANCELLED at once
+        A-->>C: 200
+    else PREPARING, EXECUTING, or VERIFYING
+        Note over A: cancel_requested_at set
+        A-->>C: 202
+        W->>A: heartbeat
+        A-->>W: cancel_attempts: [aid]
+        W->>D: kill the running container
+        W->>A: POST .../attempts/{aid}/finish (cancelled)
+        Note over A: to CANCELLED
+    end
+```
+
+- A job that has not started is cancelled in one transaction. A claim racing with the cancel either finds the job already `CANCELLED` or wins first, in which case the cancel retries and takes the running path.
+- A running job is only marked. Its worker learns about it on the next heartbeat (every 5 seconds by default) and stops that one attempt; other attempts on the worker are untouched. The heartbeat keeps listing the attempt until the worker reports it.
+- Once cancellation is requested, the job ends `CANCELLED` whatever the worker reports next, even if the command happened to finish first. A `verifying` report on a cancelled job ends the attempt and tells the worker to skip verification.
+- Cancelling a finished job returns `409`.
 
 ## Worker lifecycle
 
@@ -240,7 +311,7 @@ flowchart LR
 | ------------------------ | ----------------------- | --------------------------------------------------------------------- |
 | `postgres`               | `postgres:17-alpine`    | Published on `127.0.0.1:5433`                                         |
 | `migrate`                | `Dockerfile` → `migrate` | One-shot `migrate up`; runs after Postgres is healthy                |
-| `server`                 | `Dockerfile` → `server` | Starts only after `migrate` exits successfully; `127.0.0.1:8080`      |
+| `server`                 | `Dockerfile` → `server` | Starts only after `migrate` exits successfully; `127.0.0.1:8080`; artifacts in the `artifacts` volume |
 | `worker-01`, `worker-02` | `Dockerfile` → `worker` | Fixed names, so restarts keep their registration                      |
 | `frontend`               | `frontend/Dockerfile`   | Standalone Next.js server on `127.0.0.1:3000`                         |
 
@@ -263,10 +334,10 @@ Every push to `main` and every pull request runs `.github/workflows/ci.yml`:
 | Go                 | `go mod tidy -diff`, `go vet`, golangci-lint, unit and integration tests with `-race` |
 | Generated code     | `sqlc diff` fails if `internal/store/db` is stale                                     |
 | Dashboard          | `pnpm` lint, typecheck, and production build                                          |
-| Compose smoke test | Builds every image, starts the stack, waits for `/readyz` and two online workers, then runs a passing and a failing job end to end |
+| Compose smoke test | Builds every image, starts the stack, waits for `/readyz` and two online workers, then runs jobs that complete, fail, fail verification, and are cancelled while running, and downloads a captured log |
 
 Third-party actions are pinned to commit SHAs. `task ci` runs the same checks locally, except the smoke test.
 
 ## Status
 
-Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has workload submission, the job state machine, the job read endpoints, scheduling and claiming, and running jobs in isolated Docker containers. Sections still to come: logs and artifacts, verification, cancellation, and evidence.
+Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 (the execution core) is complete: workload submission, the job state machine, scheduling and claiming, running jobs in isolated Docker containers, log streaming and artifacts, verification, failure classification, and cancellation. The dashboard pages for jobs and evidence come next.

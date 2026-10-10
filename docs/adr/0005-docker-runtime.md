@@ -29,7 +29,8 @@ Run each step in its own Docker container, sharing one named volume per attempt.
   - no network unless the workload sets `runtime.network`;
   - a fixed environment (`HOME=/tmp`, `CI=true`, tool caches under `/tmp`), so nothing from the worker's environment, including its token, leaks in;
   - no bind mounts of host paths.
-- A step that runs past its timeout is killed and reported as timed out. A step whose context is cancelled (worker shutdown) is killed, and the attempt is reported as failed.
+- A step that runs past its timeout is killed and reported as timed out. A step whose context is cancelled is killed; the attempt is reported as cancelled when the server asked for it, and as failed when the worker is shutting down.
+- Creating and starting a container are never interrupted part-way. An aborted create request can still complete inside the daemon, leaving a container the worker never learned about, so both calls run to completion and the step checks for cancellation right after. Removing a workspace first force-removes any container still using the volume, then retries briefly while the daemon releases it.
 - Containers and volumes carry labels (`dev.tsuzuku.managed`, `dev.tsuzuku.worker`, job, attempt, role). On startup a worker removes anything labelled with its own name, left over from a crash. Workers sharing a daemon never touch each other's resources.
 - The worker reports facts (commit, exit code, timed out, durations, container details); the server decides the job's outcome. Reports are fenced: the attempt must belong to the reporting worker and still be running, so a stale or misdirected report is rejected and changes nothing.
 
