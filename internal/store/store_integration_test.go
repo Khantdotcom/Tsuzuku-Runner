@@ -238,14 +238,14 @@ func TestColumnRoundTrips(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	chunks, err := q.ListLogChunks(ctx, db.ListLogChunksParams{JobID: f.job.ID, AfterID: 0})
+	chunks, err := q.ListLogChunks(ctx, db.ListLogChunksParams{JobID: f.job.ID, AfterID: 0, RowLimit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(chunks) != 1 || !bytes.Equal(chunks[0].Data, raw) {
 		t.Fatalf("log chunks = %+v, want one chunk with %x", chunks, raw)
 	}
-	after, err := q.ListLogChunks(ctx, db.ListLogChunksParams{JobID: f.job.ID, AfterID: chunks[0].ID})
+	after, err := q.ListLogChunks(ctx, db.ListLogChunksParams{JobID: f.job.ID, AfterID: chunks[0].ID, RowLimit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

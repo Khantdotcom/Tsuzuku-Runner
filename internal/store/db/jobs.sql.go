@@ -76,6 +76,38 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, erro
 	return i, err
 }
 
+const createJobEvent = `-- name: CreateJobEvent :one
+INSERT INTO job_events (job_id, attempt_id, type, payload)
+VALUES ($1, $2, $3, $4)
+RETURNING id, job_id, attempt_id, type, payload, created_at
+`
+
+type CreateJobEventParams struct {
+	JobID     uuid.UUID
+	AttemptID *uuid.UUID
+	Type      string
+	Payload   json.RawMessage
+}
+
+func (q *Queries) CreateJobEvent(ctx context.Context, arg CreateJobEventParams) (JobEvent, error) {
+	row := q.db.QueryRow(ctx, createJobEvent,
+		arg.JobID,
+		arg.AttemptID,
+		arg.Type,
+		arg.Payload,
+	)
+	var i JobEvent
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.AttemptID,
+		&i.Type,
+		&i.Payload,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createWorkload = `-- name: CreateWorkload :one
 INSERT INTO workloads (
     id, idempotency_key, repository_url, revision, command, image, verification_command,
@@ -139,6 +171,32 @@ func (q *Queries) CreateWorkload(ctx context.Context, arg CreateWorkloadParams) 
 	return i, err
 }
 
+const getFirstJobForWorkload = `-- name: GetFirstJobForWorkload :one
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+WHERE workload_id = $1
+ORDER BY number
+LIMIT 1
+`
+
+func (q *Queries) GetFirstJobForWorkload(ctx context.Context, workloadID uuid.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, getFirstJobForWorkload, workloadID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Number,
+		&i.WorkloadID,
+		&i.State,
+		&i.AssignedWorkerID,
+		&i.ScheduledAt,
+		&i.CancelRequestedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const getJob = `-- name: GetJob :one
 SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
 WHERE id = $1
@@ -161,6 +219,186 @@ func (q *Queries) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const getJobByNumber = `-- name: GetJobByNumber :one
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+WHERE number = $1
+`
+
+func (q *Queries) GetJobByNumber(ctx context.Context, number int64) (Job, error) {
+	row := q.db.QueryRow(ctx, getJobByNumber, number)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Number,
+		&i.WorkloadID,
+		&i.State,
+		&i.AssignedWorkerID,
+		&i.ScheduledAt,
+		&i.CancelRequestedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const getWorkload = `-- name: GetWorkload :one
+SELECT id, idempotency_key, repository_url, revision, command, image, verification_command, acceptance_criteria, cpu_millis, memory_mb, timeout_seconds, network_enabled, spec, created_at FROM workloads
+WHERE id = $1
+`
+
+func (q *Queries) GetWorkload(ctx context.Context, id uuid.UUID) (Workload, error) {
+	row := q.db.QueryRow(ctx, getWorkload, id)
+	var i Workload
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.RepositoryURL,
+		&i.Revision,
+		&i.Command,
+		&i.Image,
+		&i.VerificationCommand,
+		&i.AcceptanceCriteria,
+		&i.CpuMillis,
+		&i.MemoryMB,
+		&i.TimeoutSeconds,
+		&i.NetworkEnabled,
+		&i.Spec,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getWorkloadByIdempotencyKey = `-- name: GetWorkloadByIdempotencyKey :one
+SELECT id, idempotency_key, repository_url, revision, command, image, verification_command, acceptance_criteria, cpu_millis, memory_mb, timeout_seconds, network_enabled, spec, created_at FROM workloads
+WHERE idempotency_key = $1
+`
+
+func (q *Queries) GetWorkloadByIdempotencyKey(ctx context.Context, idempotencyKey *string) (Workload, error) {
+	row := q.db.QueryRow(ctx, getWorkloadByIdempotencyKey, idempotencyKey)
+	var i Workload
+	err := row.Scan(
+		&i.ID,
+		&i.IdempotencyKey,
+		&i.RepositoryURL,
+		&i.Revision,
+		&i.Command,
+		&i.Image,
+		&i.VerificationCommand,
+		&i.AcceptanceCriteria,
+		&i.CpuMillis,
+		&i.MemoryMB,
+		&i.TimeoutSeconds,
+		&i.NetworkEnabled,
+		&i.Spec,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listJobEvents = `-- name: ListJobEvents :many
+SELECT id, job_id, attempt_id, type, payload, created_at FROM job_events
+WHERE job_id = $1 AND id > $2
+ORDER BY id
+LIMIT $3
+`
+
+type ListJobEventsParams struct {
+	JobID    uuid.UUID
+	AfterID  int64
+	RowLimit int32
+}
+
+func (q *Queries) ListJobEvents(ctx context.Context, arg ListJobEventsParams) ([]JobEvent, error) {
+	rows, err := q.db.Query(ctx, listJobEvents, arg.JobID, arg.AfterID, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []JobEvent{}
+	for rows.Next() {
+		var i JobEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.Type,
+			&i.Payload,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listJobs = `-- name: ListJobs :many
+SELECT jobs.id, jobs.number, jobs.workload_id, jobs.state, jobs.assigned_worker_id, jobs.scheduled_at, jobs.cancel_requested_at, jobs.created_at, jobs.updated_at, jobs.started_at, jobs.finished_at, w.repository_url, w.revision, w.command, w.image
+FROM jobs
+JOIN workloads w ON w.id = jobs.workload_id
+WHERE ($1::text IS NULL OR jobs.state = $1::text)
+  AND ($2::bigint IS NULL OR jobs.number < $2::bigint)
+ORDER BY jobs.number DESC
+LIMIT $3
+`
+
+type ListJobsParams struct {
+	State    *string
+	Before   *int64
+	RowLimit int32
+}
+
+type ListJobsRow struct {
+	Job           Job
+	RepositoryURL string
+	Revision      string
+	Command       string
+	Image         string
+}
+
+// ListJobs returns jobs newest first. A NULL state matches every state, and
+// before is a job number cursor: only jobs numbered below it are returned.
+func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]ListJobsRow, error) {
+	rows, err := q.db.Query(ctx, listJobs, arg.State, arg.Before, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListJobsRow{}
+	for rows.Next() {
+		var i ListJobsRow
+		if err := rows.Scan(
+			&i.Job.ID,
+			&i.Job.Number,
+			&i.Job.WorkloadID,
+			&i.Job.State,
+			&i.Job.AssignedWorkerID,
+			&i.Job.ScheduledAt,
+			&i.Job.CancelRequestedAt,
+			&i.Job.CreatedAt,
+			&i.Job.UpdatedAt,
+			&i.Job.StartedAt,
+			&i.Job.FinishedAt,
+			&i.RepositoryURL,
+			&i.Revision,
+			&i.Command,
+			&i.Image,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listTransitions = `-- name: ListTransitions :many
@@ -234,21 +472,33 @@ func (q *Queries) RecordTransition(ctx context.Context, arg RecordTransitionPara
 
 const transitionJob = `-- name: TransitionJob :one
 UPDATE jobs
-SET state = $1, updated_at = now()
-WHERE id = $2 AND state = $3
+SET state       = $1,
+    updated_at  = now(),
+    started_at  = CASE WHEN $2::boolean THEN coalesce(started_at, now()) ELSE started_at END,
+    finished_at = CASE WHEN $3::boolean THEN now() ELSE finished_at END
+WHERE id = $4 AND state = $5
 RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
 `
 
 type TransitionJobParams struct {
-	ToState   string
-	ID        uuid.UUID
-	FromState string
+	ToState      string
+	MarkStarted  bool
+	MarkFinished bool
+	ID           uuid.UUID
+	FromState    string
 }
 
 // TransitionJob is a compare-and-set: it returns no row when the job is no
 // longer in from_state, so concurrent transitions cannot both succeed.
+// started_at keeps the first start; finished_at is set on every final state.
 func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (Job, error) {
-	row := q.db.QueryRow(ctx, transitionJob, arg.ToState, arg.ID, arg.FromState)
+	row := q.db.QueryRow(ctx, transitionJob,
+		arg.ToState,
+		arg.MarkStarted,
+		arg.MarkFinished,
+		arg.ID,
+		arg.FromState,
+	)
 	var i Job
 	err := row.Scan(
 		&i.ID,

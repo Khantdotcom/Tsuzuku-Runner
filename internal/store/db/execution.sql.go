@@ -117,19 +117,57 @@ func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (J
 	return i, err
 }
 
+const listAttempts = `-- name: ListAttempts :many
+SELECT id, job_id, attempt_number, worker_id, status, exit_code, error, started_at, finished_at FROM job_attempts
+WHERE job_id = $1
+ORDER BY attempt_number
+`
+
+func (q *Queries) ListAttempts(ctx context.Context, jobID uuid.UUID) ([]JobAttempt, error) {
+	rows, err := q.db.Query(ctx, listAttempts, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []JobAttempt{}
+	for rows.Next() {
+		var i JobAttempt
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptNumber,
+			&i.WorkerID,
+			&i.Status,
+			&i.ExitCode,
+			&i.Error,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listLogChunks = `-- name: ListLogChunks :many
 SELECT id, job_id, attempt_id, seq, stream, data, created_at FROM log_chunks
 WHERE job_id = $1 AND id > $2
 ORDER BY id
+LIMIT $3
 `
 
 type ListLogChunksParams struct {
-	JobID   uuid.UUID
-	AfterID int64
+	JobID    uuid.UUID
+	AfterID  int64
+	RowLimit int32
 }
 
 func (q *Queries) ListLogChunks(ctx context.Context, arg ListLogChunksParams) ([]LogChunk, error) {
-	rows, err := q.db.Query(ctx, listLogChunks, arg.JobID, arg.AfterID)
+	rows, err := q.db.Query(ctx, listLogChunks, arg.JobID, arg.AfterID, arg.RowLimit)
 	if err != nil {
 		return nil, err
 	}
