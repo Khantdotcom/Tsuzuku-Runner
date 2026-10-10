@@ -100,26 +100,11 @@ jobs:
       - name: Build and start the stack
         run: docker compose up --build --detach
 
-      - name: Wait for the API and both workers
-        env:
-          API_URL: http://127.0.0.1:8080
-          DASHBOARD_URL: http://127.0.0.1:3000
-        run: |
-          online=0
-          for _ in $(seq 1 60); do
-            body=$(curl -fsS "$DASHBOARD_URL/api/v1/workers" 2>/dev/null) || body='{"workers":[]}'
-            online=$(jq '[.workers[] | select(.status == "online")] | length' <<<"$body")
-            if [ "$online" -ge 2 ]; then
-              break
-            fi
-            sleep 2
-          done
-          echo "workers online: $online"
-          [ "$online" -ge 2 ] || { echo "::error::expected 2 workers online, got $online"; exit 1; }
-          curl -fsS "$API_URL/readyz"
-          curl -fsS "$DASHBOARD_URL/api/readyz"
-          curl -fsS -o /dev/null "$DASHBOARD_URL/"
-          echo "stack is healthy"
+      - name: Check health and run jobs end to end
+        run: >-
+          docker run --rm --network tsuzuku_default
+          -v "$PWD/scripts:/scripts:ro"
+          alpine:3 sh /scripts/smoke-probe.sh
 
       - name: Show service status and logs
         if: failure()

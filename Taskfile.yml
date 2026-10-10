@@ -209,7 +209,7 @@ tasks:
       - task: fe:docker
 
   smoke:
-    desc: Build the stack as a separate Compose project, wait for /readyz and two online workers, then remove it (dev stack and data untouched)
+    desc: Build the stack as a separate Compose project, wait for /readyz and two online workers, run a passing and a failing job end to end, then remove it (dev stack and data untouched)
     env:
       TSUZUKU_PG_HOST_PORT: "15433"
       TSUZUKU_API_HOST_PORT: "18080"
