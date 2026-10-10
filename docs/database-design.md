@@ -125,6 +125,20 @@ State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = 
 
 Cursors are the `bigint` keys (`jobs.number`, `job_events.id`, `log_chunks.id`), so paging stays stable while new rows arrive and needs no `OFFSET`.
 
+## Execution paths
+
+Every worker report about an attempt runs in one transaction that starts by locking the attempt row.
+
+| Query               | Used for                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------ |
+| `LockAttempt`       | `SELECT ... FOR UPDATE` on the attempt; the caller checks the worker owns it and it is `RUNNING` |
+| `CreateRuntime`     | One row per container the attempt used, with the worker's start and end times              |
+| `RecordAttemptExit` | Stores the command's exit code on the attempt                                              |
+| `FinishAttempt`     | Sets the final attempt status, error, and `finished_at`; only matches a `RUNNING` attempt  |
+| `ListRuntimes`      | A job's containers across all attempts, oldest first                                       |
+
+Locking the attempt serializes reports for the same attempt, so a retried report cannot race the original. The job's state still changes only through `job.Transition`, inside the same transaction: if the report is rejected, the runtime rows and events it wrote roll back with it.
+
 ## Local development
 
 | Command               | What it does                                             |

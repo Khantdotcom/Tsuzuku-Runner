@@ -159,7 +159,36 @@ The advisory lock matters even with `SKIP LOCKED`: two rounds running at once wo
 
 With `?wait=25s` (at most 30s) the request is held open until a job is assigned. The scheduler wakes waiting claims in the same process as soon as it commits; claims also re-check every 2 seconds, which covers assignments made by another replica. When the server starts shutting down, waiting claims return `204` immediately instead of delaying shutdown.
 
-**Not yet handled.** Jobs assigned to a worker that goes offline stay `SCHEDULED`, and a claim whose response never reaches the worker leaves the job in `PREPARING`. Leases with expiry and reassignment, described in ADR 0003, arrive with recovery in a later milestone. The worker agent starts claiming once it can run jobs in a container.
+**Not yet handled.** Jobs assigned to a worker that goes offline stay `SCHEDULED`, and a claim whose response never reaches the worker leaves the job in `PREPARING`. Leases with expiry and reassignment, described in ADR 0003, arrive with recovery in a later milestone.
+
+## Running a job
+
+Each worker keeps one long-poll claim open whenever it has a free slot, and runs every claimed attempt in its own goroutine. An attempt runs as separate Docker containers that share one workspace volume ([ADR 0005](adr/0005-docker-runtime.md)):
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant D as Docker
+    participant A as API server
+    W->>D: pull image, create volume tsuzuku-<attempt>
+    W->>D: git container: fetch revision into /workspace
+    W->>A: POST .../attempts/{aid}/executing (commit)
+    Note over A: PREPARING to EXECUTING
+    W->>D: step container: sh -c "<command>"
+    W->>A: POST .../attempts/{aid}/verifying (exit code, timed out)
+    Note over A: EXECUTING to VERIFYING, or FAILED on timeout
+    W->>A: POST .../attempts/{aid}/finish
+    Note over A: VERIFYING to COMPLETED (exit 0) or FAILED
+    W->>D: remove volume
+```
+
+- **The worker reports facts; the server decides.** Reports carry the resolved commit, exit code, whether the step timed out, durations, and the container's image and limits. The server records each container in `runtimes` with an `attempt.runtime_finished` timeline event, then chooses the next state. A command that exits `0` completes the job; any other exit code, a timeout, or a failure outside the command (image pull, checkout, Docker error) fails it, with the reason in the history and on the attempt.
+- **Reports are fenced.** `POST /api/v1/workers/{id}/attempts/{attempt_id}/{executing|verifying|finish}` checks, under a row lock, that the attempt belongs to that worker (`404` otherwise) and is still running (`409` otherwise). A duplicate or late report changes nothing.
+- **Retries.** The worker retries a report on network errors and `5xx` responses for up to a minute, and stops on any `4xx`, since the server has already decided.
+- **Shutdown.** On `SIGTERM` the worker kills its running containers and reports each attempt as failed ("worker stopped before the attempt finished") before exiting. Compose gives workers 30 seconds to do this.
+- **Isolation.** Step containers drop all capabilities, run with a read-only root filesystem and a size-capped `/tmp`, have hard memory, CPU, and process limits, see no host paths, and have no network unless the workload asks for it. See ADR 0005 for the full list.
+
+Verification (running `verification.command` and checking acceptance criteria), log streaming, artifacts, and cancellation of running jobs are added in the next slices; until then a job that reaches `VERIFYING` is decided by its exit code alone.
 
 ## Worker lifecycle
 
@@ -181,6 +210,7 @@ sequenceDiagram
 - **Registration is an upsert by name.** A restarted worker keeps its ID and registration time; capacity and metadata are refreshed. Registration retries with exponential backoff (1s to 30s) until the API is reachable.
 - **Liveness is derived, not stored.** A worker is `online` when its last heartbeat is no older than `TSUZUKU_WORKER_STALE_AFTER` (15s default, three missed 5s heartbeats). The comparison uses the database clock for both sides, so clock skew between hosts cannot flip the status.
 - **Host usage** (CPU percent, used memory) comes from the latest heartbeat. If sampling fails, the worker still sends a heartbeat with the previous sample, because liveness matters more than fresh numbers.
+- **Docker is required.** A worker connects to the Docker daemon on startup and exits if it cannot, so a worker that could never run a job does not register. It then removes containers and volumes left behind by its own earlier runs (matched by the `dev.tsuzuku.worker` label).
 
 ## Dashboard
 
@@ -216,6 +246,8 @@ flowchart LR
 
 The Go images are static binaries on a distroless, non-root base. All ports bind to localhost only. Compose falls back to a development worker token when `TSUZUKU_WORKER_TOKEN` is unset.
 
+Workers mount the host's Docker socket (`/var/run/docker.sock`) and run as root to use it. Socket access is equivalent to root on the host, so a worker is a trusted, privileged process; the job containers it starts are not. Job containers and volumes are created on the host daemon next to the Compose services, named `tsuzuku-<attempt id>-<role>`.
+
 ## Data model
 
 PostgreSQL holds workloads, jobs, their full transition history, attempts, leases, logs, verification results, failures, and deliveries. It is also the job queue: queued work is jobs in state `QUEUED`, claimed with `FOR UPDATE SKIP LOCKED` and owned through expiring leases ([ADR 0003](adr/0003-postgres-as-job-queue.md)). Access goes through `internal/store`: a `pgxpool` connection pool, a `WithTx` transaction helper, and sqlc-generated queries ([ADR 0002](adr/0002-postgres-access-pgx-sqlc-goose.md)). Only `server`, `migrate`, and `seed` read `TSUZUKU_DATABASE_URL`.
@@ -231,10 +263,10 @@ Every push to `main` and every pull request runs `.github/workflows/ci.yml`:
 | Go                 | `go mod tidy -diff`, `go vet`, golangci-lint, unit and integration tests with `-race` |
 | Generated code     | `sqlc diff` fails if `internal/store/db` is stale                                     |
 | Dashboard          | `pnpm` lint, typecheck, and production build                                          |
-| Compose smoke test | Builds every image, starts the stack, and waits for `/readyz` and two online workers  |
+| Compose smoke test | Builds every image, starts the stack, waits for `/readyz` and two online workers, then runs a passing and a failing job end to end |
 
 Third-party actions are pinned to commit SHAs. `task ci` runs the same checks locally, except the smoke test.
 
 ## Status
 
-Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has started with workload submission, the job state machine, the job read endpoints, and scheduling and claiming. Sections still to come: runtime isolation, verification, and evidence.
+Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has workload submission, the job state machine, the job read endpoints, scheduling and claiming, and running jobs in isolated Docker containers. Sections still to come: logs and artifacts, verification, cancellation, and evidence.

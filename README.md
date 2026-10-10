@@ -43,15 +43,17 @@ This starts PostgreSQL, applies migrations, then runs the API server, two worker
 - Dashboard: <http://localhost:3000>
 - API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`, `/api/v1/jobs`)
 
-Submit a workload; it is stored as a `QUEUED` job, and within about a second the scheduler places it on a worker (`SCHEDULED`). Workers start running jobs once container execution lands; until then jobs wait in `SCHEDULED`:
+Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container. The job ends `COMPLETED` when the command exits `0` and `FAILED` otherwise:
 
 ```bash
 curl -i http://localhost:8080/api/v1/workloads \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: first-run' \
-  -d '{"repository":"https://github.com/Khantdotcom/Tsuzuku-Runner","revision":"main","command":"go test ./..."}'
-curl 'http://localhost:8080/api/v1/jobs?state=SCHEDULED'
+  -d '{"repository":"https://github.com/octocat/Hello-World","revision":"master","command":"test -f README","runtime":{"image":"golang:1.27"}}'
+curl 'http://localhost:8080/api/v1/jobs?limit=5'
 ```
+
+The workers start job containers through the host's Docker socket, so Compose runs them as root (see [ADR 0005](docs/adr/0005-docker-runtime.md)). The first job on a machine also pulls the job image and the git helper image.
 
 Sending the same request again with the same `Idempotency-Key` returns the same job instead of creating another. See [Workload submission](docs/architecture.md#workload-submission) for every field and its default.
 
@@ -73,7 +75,7 @@ task db:up             # PostgreSQL 17 on localhost:5433
 task migrate:up        # create the schema
 task seed              # optional: example job history
 task run:server        # API on http://localhost:8080
-task run:worker        # in a second terminal; registers and sends heartbeats
+task run:worker        # in a second terminal; needs Docker, then registers and runs jobs
 curl http://localhost:8080/readyz
 curl http://localhost:8080/api/v1/workers
 task fe:install && task fe:dev   # dashboard with hot reload on http://localhost:3000
@@ -100,7 +102,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task test:docker`      | Run unit and integration tests with `-race` in a Go container |
 | `task lint:docker` / `fe:docker` | Run golangci-lint, or the dashboard lint, typecheck, and build, in a container |
 | `task ci:docker`        | Run the full CI checks with only Docker on the host |
-| `task smoke`            | Build and start an isolated stack, check workers and readiness, then remove it |
+| `task smoke`            | Build and start an isolated stack, check workers and readiness, run a passing and a failing job, then remove it |
 
 The `:docker` variants need only Docker and Task. Use them where host toolchains can't run, for example on Windows when Smart App Control blocks freshly built test binaries, `gcc` is missing for `-race`, or `pnpm` is blocked.
 
@@ -115,7 +117,7 @@ All configuration comes from environment variables prefixed with `TSUZUKU_`. See
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
 - [Backend concepts](docs/concepts/): plain-English notes on the ideas behind the design
-- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) and how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency
+- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency, and how [workloads run in locked-down containers](docs/adr/0005-docker-runtime.md)
 
 ## License
 
