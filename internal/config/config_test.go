@@ -59,6 +59,23 @@ func TestLoadServerDefaults(t *testing.T) {
 	if cfg.Token != testToken {
 		t.Errorf("Token = %q, want %q", cfg.Token, testToken)
 	}
+	if want := (WorkloadLimits{MaxCPUMillis: 4000, MaxMemoryMB: 8192, MaxTimeout: time.Hour}); cfg.WorkloadLimits != want {
+		t.Errorf("WorkloadLimits = %+v, want %+v", cfg.WorkloadLimits, want)
+	}
+}
+
+func TestLoadServerWorkloadLimits(t *testing.T) {
+	cfg, err := loadServer(serverEnv(map[string]string{
+		"TSUZUKU_WORKLOAD_MAX_CPU_MILLIS": "8000",
+		"TSUZUKU_WORKLOAD_MAX_MEMORY_MB":  "16384",
+		"TSUZUKU_WORKLOAD_MAX_TIMEOUT":    "2h",
+	}))
+	if err != nil {
+		t.Fatalf("loadServer: %v", err)
+	}
+	if want := (WorkloadLimits{MaxCPUMillis: 8000, MaxMemoryMB: 16384, MaxTimeout: 2 * time.Hour}); cfg.WorkloadLimits != want {
+		t.Errorf("WorkloadLimits = %+v, want %+v", cfg.WorkloadLimits, want)
+	}
 }
 
 func TestLoadServerOverrides(t *testing.T) {
@@ -106,6 +123,11 @@ func TestLoadServerRejectsInvalidValues(t *testing.T) {
 		{"missing database", map[string]string{"TSUZUKU_WORKER_TOKEN": testToken}, "TSUZUKU_DATABASE_URL"},
 		{"missing token", map[string]string{"TSUZUKU_DATABASE_URL": testDatabaseURL}, "TSUZUKU_WORKER_TOKEN"},
 		{"short production token", serverEnv(map[string]string{"TSUZUKU_ENV": "production"}), "TSUZUKU_WORKER_TOKEN"},
+		{"tiny cpu limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_CPU_MILLIS": "50"}), "TSUZUKU_WORKLOAD_MAX_CPU_MILLIS"},
+		{"huge cpu limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_CPU_MILLIS": "3000000000"}), "3000000000"},
+		{"tiny memory limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_MEMORY_MB": "10"}), "TSUZUKU_WORKLOAD_MAX_MEMORY_MB"},
+		{"sub-second timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "500ms"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
+		{"huge timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "600000h"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
 	}
 
 	for _, tt := range tests {

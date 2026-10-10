@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"time"
@@ -49,11 +50,19 @@ type WorkerAuth struct {
 	Token string `env:"TSUZUKU_WORKER_TOKEN,required,notEmpty"`
 }
 
+// WorkloadLimits are the most resources a single workload may request.
+type WorkloadLimits struct {
+	MaxCPUMillis int           `env:"TSUZUKU_WORKLOAD_MAX_CPU_MILLIS" envDefault:"4000"`
+	MaxMemoryMB  int           `env:"TSUZUKU_WORKLOAD_MAX_MEMORY_MB"  envDefault:"8192"`
+	MaxTimeout   time.Duration `env:"TSUZUKU_WORKLOAD_MAX_TIMEOUT"    envDefault:"1h"`
+}
+
 // Server configures the API server process.
 type Server struct {
 	Common
 	Database
 	WorkerAuth
+	WorkloadLimits
 
 	HTTPAddr        string        `env:"TSUZUKU_HTTP_ADDR"        envDefault:":8080"`
 	ShutdownTimeout time.Duration `env:"TSUZUKU_SHUTDOWN_TIMEOUT" envDefault:"10s"`
@@ -111,6 +120,9 @@ func loadServer(environ map[string]string) (Server, error) {
 	if cfg.WorkerStaleAfter <= 0 {
 		return Server{}, fmt.Errorf("TSUZUKU_WORKER_STALE_AFTER must be positive, got %s", cfg.WorkerStaleAfter)
 	}
+	if err := cfg.WorkloadLimits.validate(); err != nil {
+		return Server{}, err
+	}
 	return cfg, nil
 }
 
@@ -158,6 +170,20 @@ func loadDBTool(environ map[string]string) (DBTool, error) {
 func (c Common) validate() error {
 	if !c.Env.valid() {
 		return fmt.Errorf("TSUZUKU_ENV must be one of development, test, production; got %q", c.Env)
+	}
+	return nil
+}
+
+// The lower bounds match the smallest workload the API accepts; the upper
+// bounds keep the values within the database's integer columns.
+func (l WorkloadLimits) validate() error {
+	switch {
+	case l.MaxCPUMillis < 100 || l.MaxCPUMillis > math.MaxInt32:
+		return fmt.Errorf("TSUZUKU_WORKLOAD_MAX_CPU_MILLIS must be between 100 and %d, got %d", math.MaxInt32, l.MaxCPUMillis)
+	case l.MaxMemoryMB < 64 || l.MaxMemoryMB > math.MaxInt32:
+		return fmt.Errorf("TSUZUKU_WORKLOAD_MAX_MEMORY_MB must be between 64 and %d, got %d", math.MaxInt32, l.MaxMemoryMB)
+	case l.MaxTimeout < time.Second || l.MaxTimeout/time.Second > math.MaxInt32:
+		return fmt.Errorf("TSUZUKU_WORKLOAD_MAX_TIMEOUT must be between 1s and %d seconds, got %s", math.MaxInt32, l.MaxTimeout)
 	}
 	return nil
 }
