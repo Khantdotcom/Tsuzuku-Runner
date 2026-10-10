@@ -154,6 +154,44 @@ func TestDockerRunCancelKillsTheContainer(t *testing.T) {
 	assertNoContainers(t, d, ws.Owner.Worker)
 }
 
+func TestDockerRunCancelledWhileStartingLeavesNothing(t *testing.T) {
+	d := newTestDocker(t)
+	for _, delay := range []time.Duration{0, 20 * time.Millisecond, 100 * time.Millisecond, 300 * time.Millisecond} {
+		ws := newTestWorkspace(t, d)
+		ctx, cancel := context.WithTimeout(context.Background(), delay)
+		_, err := d.Run(ctx, ws, shellStep(workerapi.RoleExecute, "sleep 60"), io.Discard, io.Discard)
+		cancel()
+		if err == nil {
+			t.Fatalf("delay %s: Run succeeded, want a cancellation error", delay)
+		}
+		assertNoContainers(t, d, ws.Owner.Worker)
+		if err := d.RemoveWorkspace(context.Background(), ws); err != nil {
+			t.Errorf("delay %s: remove workspace: %v", delay, err)
+		}
+	}
+}
+
+func TestDockerRemoveWorkspaceInUse(t *testing.T) {
+	d := newTestDocker(t)
+	ws := newTestWorkspace(t, d)
+	ctx := context.Background()
+
+	cfg, host := containerSpec(ws, shellStep(workerapi.RoleExecute, "sleep 60"), stepEnv(ws.Owner))
+	created, err := d.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: "tsuzuku-inuse-" + uuid.NewString()[:8], Config: cfg, HostConfig: host})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+		d.removeContainer(ctx, created.ID)
+		t.Fatal(err)
+	}
+
+	if err := d.RemoveWorkspace(ctx, ws); err != nil {
+		t.Fatalf("remove workspace held by a running container: %v", err)
+	}
+	assertNoContainers(t, d, ws.Owner.Worker)
+}
+
 func TestDockerCheckout(t *testing.T) {
 	d := newTestDocker(t)
 	ws := newTestWorkspace(t, d)

@@ -137,7 +137,7 @@ func TestNames(t *testing.T) {
 }
 
 func TestTailBufferKeepsTheEnd(t *testing.T) {
-	b := &tailBuffer{limit: 5}
+	b := NewTailBuffer(5)
 	_, _ = b.Write([]byte("abc"))
 	_, _ = b.Write([]byte("defgh"))
 	if got := b.String(); got != "defgh" {

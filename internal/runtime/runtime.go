@@ -202,13 +202,19 @@ func containerSpec(ws Workspace, s Step, env []string) (*container.Config, *cont
 	return cfg, host
 }
 
-// tailBuffer keeps only the last limit bytes written to it.
-type tailBuffer struct {
+// TailBuffer keeps only the last limit bytes written to it. It is not safe
+// for concurrent writes.
+type TailBuffer struct {
 	limit int
 	buf   []byte
 }
 
-func (t *tailBuffer) Write(p []byte) (int, error) {
+// NewTailBuffer returns a TailBuffer that keeps the last limit bytes.
+func NewTailBuffer(limit int) *TailBuffer {
+	return &TailBuffer{limit: limit}
+}
+
+func (t *TailBuffer) Write(p []byte) (int, error) {
 	t.buf = append(t.buf, p...)
 	if over := len(t.buf) - t.limit; over > 0 {
 		t.buf = t.buf[over:]
@@ -216,7 +222,8 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (t *tailBuffer) String() string {
+// String returns the kept bytes without surrounding whitespace.
+func (t *TailBuffer) String() string {
 	return string(bytes.TrimSpace(t.buf))
 }
 

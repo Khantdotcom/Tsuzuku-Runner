@@ -77,15 +77,44 @@ func (d *Docker) CreateWorkspace(ctx context.Context, owner Owner) (Workspace, e
 }
 
 // RemoveWorkspace deletes the workspace volume. It still runs if ctx is
-// already cancelled, because leaking volumes fills the disk.
+// already cancelled, because leaking volumes fills the disk. If a container
+// still holds the volume, for example one torn down by a cancellation, it is
+// removed first.
 func (d *Docker) RemoveWorkspace(ctx context.Context, ws Workspace) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 	defer cancel()
-	_, err := d.cli.VolumeRemove(ctx, ws.Volume, client.VolumeRemoveOptions{Force: true})
-	if err != nil && !cerrdefs.IsNotFound(err) {
-		return fmt.Errorf("remove workspace volume: %w", err)
+	for attempt := 1; ; attempt++ {
+		_, err := d.cli.VolumeRemove(ctx, ws.Volume, client.VolumeRemoveOptions{Force: true})
+		switch {
+		case err == nil || cerrdefs.IsNotFound(err):
+			return nil
+		case !cerrdefs.IsConflict(err) || attempt == removeVolumeAttempts:
+			return fmt.Errorf("remove workspace volume: %w", err)
+		}
+		d.removeVolumeUsers(ctx, ws.Volume)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("remove workspace volume: %w", err)
+		case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+		}
 	}
-	return nil
+}
+
+// removeVolumeAttempts bounds retries while a volume is still in use.
+const removeVolumeAttempts = 5
+
+// removeVolumeUsers force-removes every container that mounts volume.
+func (d *Docker) removeVolumeUsers(ctx context.Context, volume string) {
+	list, err := d.cli.ContainerList(ctx, client.ContainerListOptions{
+		All: true, Filters: make(client.Filters).Add("volume", volume),
+	})
+	if err != nil {
+		d.logger.WarnContext(ctx, "list containers using workspace", "volume", volume, "err", err)
+		return
+	}
+	for _, c := range list.Items {
+		d.removeContainer(ctx, c.ID)
+	}
 }
 
 // Checkout clones repo at rev into the workspace using the git helper image.
@@ -94,8 +123,8 @@ func (d *Docker) Checkout(ctx context.Context, ws Workspace, repo, rev string, t
 		return "", Result{}, err
 	}
 	step := checkoutStep(d.gitImage, timeout)
-	stdout := &tailBuffer{limit: tailBytes}
-	stderr := &tailBuffer{limit: tailBytes}
+	stdout := NewTailBuffer(tailBytes)
+	stderr := NewTailBuffer(tailBytes)
 	cfg, host := containerSpec(ws, step, checkoutEnv(repo, rev))
 	res, err := d.run(ctx, containerName(ws, step.Role), step, cfg, host, stdout, stderr)
 	if err != nil {
@@ -122,21 +151,25 @@ func (d *Docker) Run(ctx context.Context, ws Workspace, step Step, stdout, stder
 
 func (d *Docker) run(ctx context.Context, name string, step Step, cfg *container.Config, host *container.HostConfig, stdout, stderr io.Writer) (Result, error) {
 	res := Result{Step: step}
-	created, err := d.cli.ContainerCreate(ctx, client.ContainerCreateOptions{Name: name, Config: cfg, HostConfig: host})
+	// Creating, starting, waiting, and log streaming outlive ctx: an aborted
+	// create or start request can still take effect on the daemon, leaving a
+	// container this code does not know about. A cancelled step is killed and
+	// its exit observed instead.
+	bg, stopBG := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopBG()
+	created, err := d.cli.ContainerCreate(bg, client.ContainerCreateOptions{Name: name, Config: cfg, HostConfig: host})
 	if err != nil {
 		return res, fmt.Errorf("create %s container: %w", step.Role, err)
 	}
 	res.ContainerID = created.ID
 	defer d.removeContainer(ctx, created.ID)
-
-	// Waiting and log streaming outlive ctx so a cancelled step can still be
-	// killed and its exit observed.
-	bg, stopBG := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopBG()
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
 	wait := d.cli.ContainerWait(bg, created.ID, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
 
 	res.StartedAt = time.Now()
-	if _, err := d.cli.ContainerStart(ctx, created.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := d.cli.ContainerStart(bg, created.ID, client.ContainerStartOptions{}); err != nil {
 		return res, fmt.Errorf("start %s container: %w", step.Role, err)
 	}
 
