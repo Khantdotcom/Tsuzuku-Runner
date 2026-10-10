@@ -3,6 +3,7 @@
 package job_test
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -340,6 +341,151 @@ func TestTransitionRejections(t *testing.T) {
 	}
 	if got := count(t, pool, "SELECT count(*) FROM job_events WHERE type = $1", job.EventStateChanged); got != 0 {
 		t.Errorf("state change events = %d, want 0", got)
+	}
+}
+
+func addWorker(t *testing.T, pool *pgxpool.Pool, name string) uuid.UUID {
+	t.Helper()
+	w, err := db.New(pool).CreateWorker(t.Context(), db.CreateWorkerParams{
+		ID: uuid.Must(uuid.NewV7()), Name: name, Slots: 4, CpuMillis: 4000, MemoryMB: 8192, Metadata: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w.ID
+}
+
+// submitAssigned submits a job and schedules it on workerID.
+func submitAssigned(t *testing.T, pool *pgxpool.Pool, command string, workerID uuid.UUID) db.Job {
+	t.Helper()
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, command), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := transition(t, pool, job.Change{
+		JobID: sub.Job.ID, From: job.Queued, To: job.Scheduled, Actor: job.ActorScheduler, AssignWorker: &workerID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.AssignedWorkerID == nil || *j.AssignedWorkerID != workerID {
+		t.Fatalf("assigned worker = %v, want %s", j.AssignedWorkerID, workerID)
+	}
+	return j
+}
+
+func TestClaim(t *testing.T) {
+	pool := storetest.NewPool(t)
+	svc := job.NewService(pool)
+	w := addWorker(t, pool, "claimer")
+	assigned := submitAssigned(t, pool, "make test", w)
+
+	c, found, err := svc.Claim(t.Context(), w)
+	if err != nil || !found {
+		t.Fatalf("Claim: found %v, err %v", found, err)
+	}
+	if c.Job.ID != assigned.ID || c.Job.State != string(job.Preparing) || c.Job.StartedAt == nil {
+		t.Errorf("job = %+v, want PREPARING with started_at", c.Job)
+	}
+	if c.Attempt.AttemptNumber != 1 || c.Attempt.WorkerID != w || c.Attempt.JobID != assigned.ID || c.Attempt.Status != "RUNNING" {
+		t.Errorf("attempt = %+v", c.Attempt)
+	}
+	if c.Spec.Command != "make test" || c.Spec.Runtime.Image != workload.DefaultImage {
+		t.Errorf("spec = %+v", c.Spec)
+	}
+
+	history, err := db.New(pool).ListTransitions(t.Context(), assigned.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := history[len(history)-1]
+	if last.ToState != string(job.Preparing) || last.Actor != job.ActorWorker || last.Reason != "claimed as attempt 1" {
+		t.Errorf("transition = %+v", last)
+	}
+	if got := count(t, pool, "SELECT count(*) FROM job_events WHERE job_id = $1 AND attempt_id = $2", assigned.ID, c.Attempt.ID); got != 1 {
+		t.Errorf("events linked to the attempt = %d, want 1", got)
+	}
+
+	if _, found, err := svc.Claim(t.Context(), w); err != nil || found {
+		t.Errorf("second Claim: found %v, err %v; want nothing left", found, err)
+	}
+}
+
+func TestClaimOnlyAssignedJobs(t *testing.T) {
+	pool := storetest.NewPool(t)
+	svc := job.NewService(pool)
+	owner := addWorker(t, pool, "owner")
+	other := addWorker(t, pool, "other")
+	submitAssigned(t, pool, "make", owner)
+	if _, err := svc.Submit(t.Context(), newSpec(t, "queued only"), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found, err := svc.Claim(t.Context(), other); err != nil || found {
+		t.Errorf("other worker: found %v, err %v; want nothing", found, err)
+	}
+	if got := count(t, pool, "SELECT count(*) FROM job_attempts"); got != 0 {
+		t.Errorf("attempts = %d, want 0", got)
+	}
+	if _, found, err := svc.Claim(t.Context(), owner); err != nil || !found {
+		t.Errorf("owner: found %v, err %v", found, err)
+	}
+	if _, found, err := svc.Claim(t.Context(), owner); err != nil || found {
+		t.Errorf("owner again: found %v, err %v; the QUEUED job is not assigned yet", found, err)
+	}
+}
+
+func TestClaimOldestFirst(t *testing.T) {
+	pool := storetest.NewPool(t)
+	svc := job.NewService(pool)
+	w := addWorker(t, pool, "w")
+	first := submitAssigned(t, pool, "first", w)
+	second := submitAssigned(t, pool, "second", w)
+
+	for _, want := range []db.Job{first, second} {
+		c, found, err := svc.Claim(t.Context(), w)
+		if err != nil || !found || c.Job.ID != want.ID {
+			t.Errorf("claimed %v (found %v, err %v), want job #%d", c.Job.Number, found, err, want.Number)
+		}
+	}
+}
+
+func TestConcurrentClaimsHaveOneWinner(t *testing.T) {
+	pool := storetest.NewPool(t)
+	svc := job.NewService(pool)
+	w := addWorker(t, pool, "w")
+	submitAssigned(t, pool, "make", w)
+
+	const n = 5
+	var (
+		wg     sync.WaitGroup
+		start  = make(chan struct{})
+		founds = make([]bool, n)
+		errs   = make([]error, n)
+	)
+	for i := range n {
+		wg.Go(func() {
+			<-start
+			_, founds[i], errs[i] = svc.Claim(t.Context(), w)
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	wins := 0
+	for i := range n {
+		if errs[i] != nil {
+			t.Errorf("claim %d: %v", i, errs[i])
+		}
+		if founds[i] {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("wins = %d, want exactly 1", wins)
+	}
+	if got := count(t, pool, "SELECT count(*) FROM job_attempts"); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
 	}
 }
 

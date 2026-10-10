@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strconv"
 
@@ -18,8 +19,12 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
-// ActorAPI is the actor recorded for changes made through the HTTP API.
-const ActorAPI = "api"
+// Actors recorded on state transitions.
+const (
+	ActorAPI       = "api"
+	ActorScheduler = "scheduler"
+	ActorWorker    = "worker"
+)
 
 // Event types written to job_events.
 const (
@@ -49,6 +54,12 @@ type Change struct {
 	To     State
 	Actor  string
 	Reason string
+	// AssignWorker, when set, becomes the job's assigned worker in the same update.
+	AssignWorker *uuid.UUID
+	// AttemptID, when set, links the timeline event to an attempt.
+	AttemptID *uuid.UUID
+	// Details are extra fields for the timeline event payload.
+	Details map[string]any
 }
 
 // Transition moves a job from c.From to c.To, records the transition, and
@@ -65,11 +76,12 @@ func Transition(ctx context.Context, q *db.Queries, c Change) (db.Job, error) {
 	}
 
 	j, err := q.TransitionJob(ctx, db.TransitionJobParams{
-		ID:           c.JobID,
-		FromState:    string(c.From),
-		ToState:      string(c.To),
-		MarkStarted:  c.To == Preparing,
-		MarkFinished: c.To.Terminal(),
+		ID:             c.JobID,
+		FromState:      string(c.From),
+		ToState:        string(c.To),
+		AssignWorkerID: c.AssignWorker,
+		MarkStarted:    c.To == Preparing,
+		MarkFinished:   c.To.Terminal(),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		current, getErr := q.GetJob(ctx, c.JobID)
@@ -91,14 +103,15 @@ func Transition(ctx context.Context, q *db.Queries, c Change) (db.Job, error) {
 	}); err != nil {
 		return db.Job{}, fmt.Errorf("record transition: %w", err)
 	}
-	payload, err := json.Marshal(map[string]string{
-		"from": from, "to": j.State, "actor": c.Actor, "reason": c.Reason,
-	})
+	fields := make(map[string]any, len(c.Details)+4)
+	maps.Copy(fields, c.Details)
+	fields["from"], fields["to"], fields["actor"], fields["reason"] = from, j.State, c.Actor, c.Reason
+	payload, err := json.Marshal(fields)
 	if err != nil {
 		return db.Job{}, err
 	}
 	if _, err := q.CreateJobEvent(ctx, db.CreateJobEventParams{
-		JobID: j.ID, Type: EventStateChanged, Payload: payload,
+		JobID: j.ID, AttemptID: c.AttemptID, Type: EventStateChanged, Payload: payload,
 	}); err != nil {
 		return db.Job{}, fmt.Errorf("record state change event: %w", err)
 	}
@@ -332,6 +345,71 @@ func (s *Service) Attempts(ctx context.Context, jobID uuid.UUID) ([]db.JobAttemp
 // Events returns up to limit timeline events with IDs above after.
 func (s *Service) Events(ctx context.Context, jobID uuid.UUID, after int64, limit int32) ([]db.JobEvent, error) {
 	return s.q.ListJobEvents(ctx, db.ListJobEventsParams{JobID: jobID, AfterID: after, RowLimit: limit})
+}
+
+// Claimed is a job a worker has started: its new attempt and what to run.
+type Claimed struct {
+	Job     db.Job
+	Attempt db.JobAttempt
+	Spec    workload.Spec
+}
+
+// Claim starts the oldest SCHEDULED job assigned to workerID: it creates the
+// next attempt and moves the job to PREPARING in one transaction. found is
+// false when the worker has no job waiting. Concurrent claims never return
+// the same job, because the job row stays locked until the claim commits.
+func (s *Service) Claim(ctx context.Context, workerID uuid.UUID) (c Claimed, found bool, err error) {
+	err = store.WithTx(ctx, s.pool, func(q *db.Queries) error {
+		j, err := q.LockNextAssignedJob(ctx, &workerID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("find assigned job: %w", err)
+		}
+
+		w, err := q.GetWorkload(ctx, j.WorkloadID)
+		if err != nil {
+			return fmt.Errorf("load workload: %w", err)
+		}
+		if err := json.Unmarshal(w.Spec, &c.Spec); err != nil {
+			return fmt.Errorf("decode workload spec: %w", err)
+		}
+
+		number, err := q.NextAttemptNumber(ctx, j.ID)
+		if err != nil {
+			return fmt.Errorf("next attempt number: %w", err)
+		}
+		attemptID, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		c.Attempt, err = q.CreateAttempt(ctx, db.CreateAttemptParams{
+			ID: attemptID, JobID: j.ID, AttemptNumber: number, WorkerID: workerID,
+		})
+		if err != nil {
+			return fmt.Errorf("create attempt: %w", err)
+		}
+
+		c.Job, err = Transition(ctx, q, Change{
+			JobID:     j.ID,
+			From:      Scheduled,
+			To:        Preparing,
+			Actor:     ActorWorker,
+			Reason:    fmt.Sprintf("claimed as attempt %d", number),
+			AttemptID: &attemptID,
+			Details:   map[string]any{"worker_id": workerID, "attempt_number": number},
+		})
+		if err != nil {
+			return err
+		}
+		found = true
+		return nil
+	})
+	if err != nil {
+		return Claimed{}, false, err
+	}
+	return c, found, nil
 }
 
 // Logs returns up to limit log chunks with IDs above after.
