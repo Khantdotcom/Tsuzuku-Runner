@@ -68,6 +68,8 @@ type Server struct {
 	ShutdownTimeout time.Duration `env:"TSUZUKU_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
 	WorkerStaleAfter time.Duration `env:"TSUZUKU_WORKER_STALE_AFTER" envDefault:"15s"`
+	// SchedulerInterval is the time between scheduling rounds.
+	SchedulerInterval time.Duration `env:"TSUZUKU_SCHEDULER_INTERVAL" envDefault:"1s"`
 }
 
 // Worker configures the worker process.
@@ -119,6 +121,9 @@ func loadServer(environ map[string]string) (Server, error) {
 	}
 	if cfg.WorkerStaleAfter <= 0 {
 		return Server{}, fmt.Errorf("TSUZUKU_WORKER_STALE_AFTER must be positive, got %s", cfg.WorkerStaleAfter)
+	}
+	if cfg.SchedulerInterval < 100*time.Millisecond {
+		return Server{}, fmt.Errorf("TSUZUKU_SCHEDULER_INTERVAL must be at least 100ms, got %s", cfg.SchedulerInterval)
 	}
 	if err := cfg.WorkloadLimits.validate(); err != nil {
 		return Server{}, err

@@ -62,6 +62,9 @@ func TestLoadServerDefaults(t *testing.T) {
 	if want := (WorkloadLimits{MaxCPUMillis: 4000, MaxMemoryMB: 8192, MaxTimeout: time.Hour}); cfg.WorkloadLimits != want {
 		t.Errorf("WorkloadLimits = %+v, want %+v", cfg.WorkloadLimits, want)
 	}
+	if cfg.SchedulerInterval != time.Second {
+		t.Errorf("SchedulerInterval = %s, want 1s", cfg.SchedulerInterval)
+	}
 }
 
 func TestLoadServerWorkloadLimits(t *testing.T) {
@@ -128,6 +131,8 @@ func TestLoadServerRejectsInvalidValues(t *testing.T) {
 		{"tiny memory limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_MEMORY_MB": "10"}), "TSUZUKU_WORKLOAD_MAX_MEMORY_MB"},
 		{"sub-second timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "500ms"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
 		{"huge timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "600000h"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
+		{"tiny scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "10ms"}), "TSUZUKU_SCHEDULER_INTERVAL"},
+		{"negative scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "-1s"}), "TSUZUKU_SCHEDULER_INTERVAL"},
 	}
 
 	for _, tt := range tests {
