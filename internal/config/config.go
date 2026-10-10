@@ -2,11 +2,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -82,6 +84,9 @@ type Worker struct {
 	APIURL            string        `env:"TSUZUKU_API_URL"                   envDefault:"http://localhost:8080"`
 	Slots             int           `env:"TSUZUKU_WORKER_SLOTS"              envDefault:"2"`
 	HeartbeatInterval time.Duration `env:"TSUZUKU_WORKER_HEARTBEAT_INTERVAL" envDefault:"5s"`
+	// GitImage is the helper image that clones repositories into workspaces.
+	GitImage        string        `env:"TSUZUKU_WORKER_GIT_IMAGE"        envDefault:"alpine/git:v2.49.1"`
+	CheckoutTimeout time.Duration `env:"TSUZUKU_WORKER_CHECKOUT_TIMEOUT" envDefault:"5m"`
 }
 
 // DBTool configures one-shot database commands such as migrate and seed.
@@ -150,6 +155,12 @@ func loadWorker(environ map[string]string) (Worker, error) {
 	}
 	if u, err := url.Parse(cfg.APIURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return Worker{}, fmt.Errorf("TSUZUKU_API_URL must be an http(s) URL with a host, got %q", cfg.APIURL)
+	}
+	if strings.TrimSpace(cfg.GitImage) == "" {
+		return Worker{}, errors.New("TSUZUKU_WORKER_GIT_IMAGE must not be empty")
+	}
+	if cfg.CheckoutTimeout < time.Second {
+		return Worker{}, fmt.Errorf("TSUZUKU_WORKER_CHECKOUT_TIMEOUT must be at least 1s, got %s", cfg.CheckoutTimeout)
 	}
 	if cfg.Name == "" {
 		host, err := os.Hostname()

@@ -173,3 +173,56 @@ func TestClientErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestClientAttemptReports(t *testing.T) {
+	workerID, attemptID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	var paths []string
+	var execReq workerapi.ExecutingRequest
+	var finReq workerapi.FinishRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case workerapi.AttemptPath(workerID, attemptID, workerapi.ActionExecuting):
+			_ = json.NewDecoder(r.Body).Decode(&execReq)
+			w.WriteHeader(http.StatusNoContent)
+		case workerapi.AttemptPath(workerID, attemptID, workerapi.ActionVerifying):
+			_ = json.NewEncoder(w).Encode(workerapi.VerifyingResponse{Verify: true})
+		case workerapi.AttemptPath(workerID, attemptID, workerapi.ActionFinish):
+			_ = json.NewDecoder(r.Body).Decode(&finReq)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	client := NewClient(srv.URL, clientToken)
+
+	if err := client.Executing(t.Context(), workerID, attemptID, workerapi.ExecutingRequest{Commit: "abc"}); err != nil {
+		t.Fatalf("Executing: %v", err)
+	}
+	verify, err := client.Verifying(t.Context(), workerID, attemptID, workerapi.VerifyingRequest{})
+	if err != nil || !verify {
+		t.Fatalf("Verifying: verify %v, err %v", verify, err)
+	}
+	if err := client.Finish(t.Context(), workerID, attemptID, workerapi.FinishRequest{Error: "boom"}); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if len(paths) != 3 || execReq.Commit != "abc" || finReq.Error != "boom" {
+		t.Errorf("paths = %v, executing = %+v, finish = %+v", paths, execReq, finReq)
+	}
+}
+
+func TestClientAttemptReportRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"detail":"attempt has already finished"}`))
+	}))
+	defer srv.Close()
+
+	err := NewClient(srv.URL, clientToken).Finish(t.Context(), uuid.New(), uuid.New(), workerapi.FinishRequest{})
+	apiErr, ok := errors.AsType[*APIError](err)
+	if !ok || apiErr.Status != http.StatusConflict || apiErr.Detail != "attempt has already finished" {
+		t.Fatalf("err = %v, want a 409 APIError", err)
+	}
+}

@@ -103,6 +103,25 @@ func (c *Client) Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.Hear
 	return err
 }
 
+// Executing reports that the repository is checked out and the command is
+// about to start.
+func (c *Client) Executing(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.ExecutingRequest) error {
+	return c.post(ctx, workerapi.AttemptPath(workerID, attemptID, workerapi.ActionExecuting), req, http.StatusNoContent, nil)
+}
+
+// Verifying reports how the command ended. verify is true when the server
+// wants the worker to continue with verification.
+func (c *Client) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.VerifyingRequest) (bool, error) {
+	var resp workerapi.VerifyingResponse
+	err := c.post(ctx, workerapi.AttemptPath(workerID, attemptID, workerapi.ActionVerifying), req, http.StatusOK, &resp)
+	return resp.Verify, err
+}
+
+// Finish ends the attempt. The server decides the job's final state.
+func (c *Client) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req workerapi.FinishRequest) error {
+	return c.post(ctx, workerapi.AttemptPath(workerID, attemptID, workerapi.ActionFinish), req, http.StatusNoContent, nil)
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, want int, out any) error {
 	resp, err := c.send(ctx, c.http, path, body)
 	if err != nil {

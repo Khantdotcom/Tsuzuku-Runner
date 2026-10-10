@@ -171,6 +171,12 @@ func TestLoadWorkerDefaults(t *testing.T) {
 	if cfg.Slots != 2 {
 		t.Errorf("Slots = %d, want 2", cfg.Slots)
 	}
+	if cfg.GitImage != "alpine/git:v2.49.1" {
+		t.Errorf("GitImage = %q", cfg.GitImage)
+	}
+	if cfg.CheckoutTimeout != 5*time.Minute {
+		t.Errorf("CheckoutTimeout = %v, want 5m", cfg.CheckoutTimeout)
+	}
 }
 
 func TestLoadWorkerOverrides(t *testing.T) {
@@ -179,9 +185,14 @@ func TestLoadWorkerOverrides(t *testing.T) {
 		"TSUZUKU_WORKER_HEARTBEAT_INTERVAL": "2s",
 		"TSUZUKU_API_URL":                   "https://tsuzuku.example.com",
 		"TSUZUKU_WORKER_SLOTS":              "4",
+		"TSUZUKU_WORKER_GIT_IMAGE":          "registry.example.com/git:2",
+		"TSUZUKU_WORKER_CHECKOUT_TIMEOUT":   "90s",
 	}))
 	if err != nil {
 		t.Fatalf("loadWorker: %v", err)
+	}
+	if cfg.GitImage != "registry.example.com/git:2" || cfg.CheckoutTimeout != 90*time.Second {
+		t.Errorf("GitImage = %q, CheckoutTimeout = %v", cfg.GitImage, cfg.CheckoutTimeout)
 	}
 
 	if cfg.Name != "worker-01" {
@@ -209,6 +220,8 @@ func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 		{"zero slots", workerEnv(map[string]string{"TSUZUKU_WORKER_SLOTS": "0"}), "TSUZUKU_WORKER_SLOTS"},
 		{"relative api url", workerEnv(map[string]string{"TSUZUKU_API_URL": "localhost:8080"}), "TSUZUKU_API_URL"},
 		{"non-http api url", workerEnv(map[string]string{"TSUZUKU_API_URL": "ftp://example.com"}), "TSUZUKU_API_URL"},
+		{"blank git image", workerEnv(map[string]string{"TSUZUKU_WORKER_GIT_IMAGE": " "}), "TSUZUKU_WORKER_GIT_IMAGE"},
+		{"short checkout timeout", workerEnv(map[string]string{"TSUZUKU_WORKER_CHECKOUT_TIMEOUT": "10ms"}), "TSUZUKU_WORKER_CHECKOUT_TIMEOUT"},
 	}
 
 	for _, tt := range tests {

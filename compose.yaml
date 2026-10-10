@@ -14,13 +14,22 @@ x-common-env: &common-env
 
 x-database-url: &database-url postgres://tsuzuku:tsuzuku@postgres:5432/tsuzuku?sslmode=disable
 
+# Workers start job containers through the host's Docker socket. Access to
+# that socket is equivalent to root on the host, so the worker runs as root
+# here and must only be given to trusted processes. Job containers themselves
+# are locked down (see docs/adr/0005-docker-runtime.md).
 x-worker: &worker
   build:
     <<: *go-build
     target: worker
+  user: "0:0"
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
   depends_on:
     server:
       condition: service_started
+  # Leaves time to kill running job containers and report them as failed.
+  stop_grace_period: 30s
   restart: unless-stopped
 
 services:
