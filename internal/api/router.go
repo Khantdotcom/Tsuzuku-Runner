@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
 // Config holds the API's dependencies and settings.
@@ -15,17 +17,22 @@ type Config struct {
 	Logger  *slog.Logger
 	DB      Pinger
 	Workers WorkerStore
+	Jobs    JobService
 	// WorkerToken is the shared bearer token workers must present.
 	WorkerToken string
 	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
 	WorkerStaleAfter time.Duration
+	// WorkloadLimits caps the resources a submitted workload may request.
+	WorkloadLimits workload.Limits
 }
 
 type server struct {
 	logger           *slog.Logger
 	db               Pinger
 	workers          WorkerStore
+	jobs             JobService
 	workerStaleAfter time.Duration
+	workloadLimits   workload.Limits
 }
 
 // NewRouter builds the HTTP handler for the API server.
@@ -34,7 +41,9 @@ func NewRouter(cfg Config) http.Handler {
 		logger:           cfg.Logger,
 		db:               cfg.DB,
 		workers:          cfg.Workers,
+		jobs:             cfg.Jobs,
 		workerStaleAfter: cfg.WorkerStaleAfter,
+		workloadLimits:   cfg.WorkloadLimits,
 	}
 
 	r := chi.NewRouter()
@@ -55,6 +64,13 @@ func NewRouter(cfg Config) http.Handler {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/workers", s.handleListWorkers)
+
+		r.Post("/workloads", s.handleSubmitWorkload)
+		r.Get("/jobs", s.handleListJobs)
+		r.Get("/jobs/{id}", s.handleGetJob)
+		r.Get("/jobs/{id}/attempts", s.handleListAttempts)
+		r.Get("/jobs/{id}/events", s.handleListEvents)
+		r.Get("/jobs/{id}/logs", s.handleListLogs)
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireWorkerToken(cfg.WorkerToken))

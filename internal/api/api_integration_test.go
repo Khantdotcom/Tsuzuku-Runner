@@ -15,10 +15,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/storetest"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/worker"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
 const token = "integration-token"
@@ -43,8 +45,10 @@ func newServer(t *testing.T, staleAfter time.Duration) *httptest.Server {
 		Logger:           slog.New(slog.DiscardHandler),
 		DB:               pool,
 		Workers:          db.New(pool),
+		Jobs:             job.NewService(pool),
 		WorkerToken:      token,
 		WorkerStaleAfter: staleAfter,
+		WorkloadLimits:   workload.DefaultLimits(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv

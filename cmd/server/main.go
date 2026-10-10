@@ -13,9 +13,11 @@ import (
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
 func main() {
@@ -45,8 +47,14 @@ func run() error {
 		Logger:           logger,
 		DB:               pool,
 		Workers:          db.New(pool),
+		Jobs:             job.NewService(pool),
 		WorkerToken:      cfg.Token,
 		WorkerStaleAfter: cfg.WorkerStaleAfter,
+		WorkloadLimits: workload.Limits{
+			MaxCPUMillis: cfg.MaxCPUMillis,
+			MaxMemoryMB:  cfg.MaxMemoryMB,
+			MaxTimeout:   cfg.MaxTimeout,
+		},
 	})
 
 	// No WriteTimeout: later milestones stream logs over long-lived SSE connections.

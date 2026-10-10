@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"reflect"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,12 +20,12 @@ import (
 )
 
 const (
-	maxBodyBytes      = 64 << 10
-	maxWorkerNameLen  = 128
-	maxWorkerSlots    = 256
-	workerOnline      = "online"
-	workerOffline     = "offline"
-	invalidWorkerBody = "request body must be a JSON object"
+	maxBodyBytes     = 64 << 10
+	maxWorkerNameLen = 128
+	maxWorkerSlots   = 256
+	workerOnline     = "online"
+	workerOffline    = "offline"
+	invalidBody      = "request body must be a JSON object"
 )
 
 var workerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -53,7 +55,7 @@ type workerView struct {
 
 func (s *server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
 	var req workerapi.RegisterRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSON(w, r, &req, false) {
 		return
 	}
 	if err := validateRegister(req); err != nil {
@@ -96,7 +98,7 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req workerapi.HeartbeatRequest
-	if !decodeJSON(w, r, &req) {
+	if !decodeJSON(w, r, &req, false) {
 		return
 	}
 	if err := validateHeartbeat(req); err != nil {
@@ -177,19 +179,52 @@ func validateHeartbeat(req workerapi.HeartbeatRequest) error {
 	return nil
 }
 
-// decodeJSON reads a single JSON object from the request body. On failure it
-// writes a 400 response and returns false.
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+// decodeJSON reads a single JSON object from the request body. With strict,
+// unknown fields are rejected so that a misspelled field is not silently
+// ignored. On failure it writes a 400 response and returns false.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any, strict bool) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if strict {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(v); err != nil {
-		writeProblem(w, r, http.StatusBadRequest, invalidWorkerBody)
+		writeProblem(w, r, http.StatusBadRequest, decodeErrorDetail(err))
 		return false
 	}
 	if dec.More() {
-		writeProblem(w, r, http.StatusBadRequest, invalidWorkerBody)
+		writeProblem(w, r, http.StatusBadRequest, invalidBody)
 		return false
 	}
 	return true
+}
+
+func decodeErrorDetail(err error) string {
+	var typeErr *json.UnmarshalTypeError
+	var sizeErr *http.MaxBytesError
+	switch {
+	case errors.As(err, &sizeErr):
+		return fmt.Sprintf("request body must be at most %d bytes", sizeErr.Limit)
+	case errors.As(err, &typeErr) && typeErr.Field != "":
+		return fmt.Sprintf("%s must be a JSON %s", typeErr.Field, jsonKind(typeErr.Type.Kind()))
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		return strings.TrimPrefix(err.Error(), "json: ")
+	}
+	return invalidBody
+}
+
+func jsonKind(k reflect.Kind) string {
+	switch k {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "boolean"
+	case reflect.Slice, reflect.Array:
+		return "array"
+	case reflect.Struct, reflect.Map, reflect.Pointer:
+		return "object"
+	default:
+		return "number"
+	}
 }
 
 func (s *server) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
