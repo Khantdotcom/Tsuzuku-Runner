@@ -114,6 +114,7 @@ All configuration comes from environment variables prefixed with `TSUZUKU_`. See
 
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
+- [Backend concepts](docs/concepts/): plain-English notes on the ideas behind the design
 - [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) and how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency
 
 ## License
