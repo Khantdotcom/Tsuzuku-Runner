@@ -72,6 +72,8 @@ services:
       TSUZUKU_WORKER_TOKEN: ${TSUZUKU_WORKER_TOKEN:-dev-worker-token}
     ports:
       - "127.0.0.1:${TSUZUKU_API_HOST_PORT:-8080}:8080"
+    volumes:
+      - artifacts:/var/lib/tsuzuku/artifacts
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -111,3 +113,4 @@ services:
 
 volumes:
   pgdata:
+  artifacts:

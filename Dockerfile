@@ -11,9 +11,14 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/server ./cmd/worker ./cmd/migrate
+RUN mkdir -p /out/artifacts
 
 FROM gcr.io/distroless/static-debian13:nonroot AS server
 COPY --from=build /out/server /usr/local/bin/server
+# Owned by the nonroot user so the server can write evidence files. A named
+# volume mounted here starts with this ownership.
+COPY --from=build --chown=65532:65532 /out/artifacts /var/lib/tsuzuku/artifacts
+ENV TSUZUKU_ARTIFACT_DIR=/var/lib/tsuzuku/artifacts
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/server"]
 
