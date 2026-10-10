@@ -435,6 +435,79 @@ func (q *Queries) ListTransitions(ctx context.Context, jobID uuid.UUID) ([]State
 	return items, nil
 }
 
+const lockNextAssignedJob = `-- name: LockNextAssignedJob :one
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+WHERE assigned_worker_id = $1 AND state = 'SCHEDULED'
+ORDER BY created_at, number
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+`
+
+// LockNextAssignedJob returns the oldest SCHEDULED job assigned to a worker
+// and locks it, skipping a job another claim is already taking.
+func (q *Queries) LockNextAssignedJob(ctx context.Context, workerID *uuid.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, lockNextAssignedJob, workerID)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Number,
+		&i.WorkloadID,
+		&i.State,
+		&i.AssignedWorkerID,
+		&i.ScheduledAt,
+		&i.CancelRequestedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
+const lockQueuedJobs = `-- name: LockQueuedJobs :many
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+WHERE state = 'QUEUED'
+  AND (scheduled_at IS NULL OR scheduled_at <= now())
+ORDER BY created_at, number
+LIMIT $1
+FOR UPDATE SKIP LOCKED
+`
+
+// LockQueuedJobs returns the oldest placeable QUEUED jobs and locks them for
+// this transaction. SKIP LOCKED passes over rows another transaction holds
+// instead of waiting for them.
+func (q *Queries) LockQueuedJobs(ctx context.Context, rowLimit int32) ([]Job, error) {
+	rows, err := q.db.Query(ctx, lockQueuedJobs, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Job{}
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Number,
+			&i.WorkloadID,
+			&i.State,
+			&i.AssignedWorkerID,
+			&i.ScheduledAt,
+			&i.CancelRequestedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const recordTransition = `-- name: RecordTransition :one
 INSERT INTO state_transitions (job_id, from_state, to_state, actor, reason)
 VALUES ($1, $2, $3, $4, $5)
@@ -472,28 +545,32 @@ func (q *Queries) RecordTransition(ctx context.Context, arg RecordTransitionPara
 
 const transitionJob = `-- name: TransitionJob :one
 UPDATE jobs
-SET state       = $1,
-    updated_at  = now(),
-    started_at  = CASE WHEN $2::boolean THEN coalesce(started_at, now()) ELSE started_at END,
-    finished_at = CASE WHEN $3::boolean THEN now() ELSE finished_at END
-WHERE id = $4 AND state = $5
+SET state              = $1,
+    updated_at         = now(),
+    assigned_worker_id = coalesce($2::uuid, assigned_worker_id),
+    started_at         = CASE WHEN $3::boolean THEN coalesce(started_at, now()) ELSE started_at END,
+    finished_at        = CASE WHEN $4::boolean THEN now() ELSE finished_at END
+WHERE id = $5 AND state = $6
 RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
 `
 
 type TransitionJobParams struct {
-	ToState      string
-	MarkStarted  bool
-	MarkFinished bool
-	ID           uuid.UUID
-	FromState    string
+	ToState        string
+	AssignWorkerID *uuid.UUID
+	MarkStarted    bool
+	MarkFinished   bool
+	ID             uuid.UUID
+	FromState      string
 }
 
 // TransitionJob is a compare-and-set: it returns no row when the job is no
 // longer in from_state, so concurrent transitions cannot both succeed.
 // started_at keeps the first start; finished_at is set on every final state.
+// A non-NULL assign_worker_id sets the assigned worker in the same update.
 func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (Job, error) {
 	row := q.db.QueryRow(ctx, transitionJob,
 		arg.ToState,
+		arg.AssignWorkerID,
 		arg.MarkStarted,
 		arg.MarkFinished,
 		arg.ID,
@@ -514,4 +591,18 @@ func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (J
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const tryLockScheduler = `-- name: TryLockScheduler :one
+SELECT pg_try_advisory_xact_lock($1::bigint) AS locked
+`
+
+// TryLockScheduler takes a transaction-level advisory lock without waiting.
+// It returns false when another transaction holds it; the lock is released
+// at commit or rollback.
+func (q *Queries) TryLockScheduler(ctx context.Context, lockKey int64) (bool, error) {
+	row := q.db.QueryRow(ctx, tryLockScheduler, lockKey)
+	var locked bool
+	err := row.Scan(&locked)
+	return locked, err
 }

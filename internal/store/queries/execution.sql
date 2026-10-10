@@ -3,6 +3,11 @@ INSERT INTO job_attempts (id, job_id, attempt_number, worker_id)
 VALUES (@id, @job_id, @attempt_number, @worker_id)
 RETURNING *;
 
+-- name: NextAttemptNumber :one
+SELECT (coalesce(max(attempt_number), 0) + 1)::integer AS next
+FROM job_attempts
+WHERE job_id = @job_id;
+
 -- name: ListAttempts :many
 SELECT * FROM job_attempts
 WHERE job_id = @job_id

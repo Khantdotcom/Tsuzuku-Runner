@@ -50,13 +50,41 @@ LIMIT @row_limit;
 -- TransitionJob is a compare-and-set: it returns no row when the job is no
 -- longer in from_state, so concurrent transitions cannot both succeed.
 -- started_at keeps the first start; finished_at is set on every final state.
+-- A non-NULL assign_worker_id sets the assigned worker in the same update.
 UPDATE jobs
-SET state       = @to_state,
-    updated_at  = now(),
-    started_at  = CASE WHEN @mark_started::boolean THEN coalesce(started_at, now()) ELSE started_at END,
-    finished_at = CASE WHEN @mark_finished::boolean THEN now() ELSE finished_at END
+SET state              = @to_state,
+    updated_at         = now(),
+    assigned_worker_id = coalesce(sqlc.narg(assign_worker_id)::uuid, assigned_worker_id),
+    started_at         = CASE WHEN @mark_started::boolean THEN coalesce(started_at, now()) ELSE started_at END,
+    finished_at        = CASE WHEN @mark_finished::boolean THEN now() ELSE finished_at END
 WHERE id = @id AND state = @from_state
 RETURNING *;
+
+-- name: TryLockScheduler :one
+-- TryLockScheduler takes a transaction-level advisory lock without waiting.
+-- It returns false when another transaction holds it; the lock is released
+-- at commit or rollback.
+SELECT pg_try_advisory_xact_lock(@lock_key::bigint) AS locked;
+
+-- name: LockQueuedJobs :many
+-- LockQueuedJobs returns the oldest placeable QUEUED jobs and locks them for
+-- this transaction. SKIP LOCKED passes over rows another transaction holds
+-- instead of waiting for them.
+SELECT * FROM jobs
+WHERE state = 'QUEUED'
+  AND (scheduled_at IS NULL OR scheduled_at <= now())
+ORDER BY created_at, number
+LIMIT @row_limit
+FOR UPDATE SKIP LOCKED;
+
+-- name: LockNextAssignedJob :one
+-- LockNextAssignedJob returns the oldest SCHEDULED job assigned to a worker
+-- and locks it, skipping a job another claim is already taking.
+SELECT * FROM jobs
+WHERE assigned_worker_id = @worker_id AND state = 'SCHEDULED'
+ORDER BY created_at, number
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
 
 -- name: RecordTransition :one
 INSERT INTO state_transitions (job_id, from_state, to_state, actor, reason)

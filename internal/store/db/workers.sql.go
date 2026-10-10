@@ -76,6 +76,52 @@ func (q *Queries) GetWorkerByName(ctx context.Context, name string) (Worker, err
 	return i, err
 }
 
+const listSchedulableWorkers = `-- name: ListSchedulableWorkers :many
+SELECT w.id, w.name, w.slots, count(j.id)::integer AS active_jobs
+FROM workers w
+LEFT JOIN jobs j
+    ON j.assigned_worker_id = w.id
+   AND j.state IN ('SCHEDULED', 'PREPARING', 'EXECUTING', 'VERIFYING')
+WHERE w.last_heartbeat_at >= now() - make_interval(secs => $1::double precision)
+GROUP BY w.id
+ORDER BY w.registered_at, w.id
+`
+
+type ListSchedulableWorkersRow struct {
+	ID         uuid.UUID
+	Name       string
+	Slots      int32
+	ActiveJobs int32
+}
+
+// ListSchedulableWorkers returns online workers, oldest registration first,
+// with the number of jobs they hold that have not finished. Liveness uses the
+// database clock, the same clock that stamped last_heartbeat_at.
+func (q *Queries) ListSchedulableWorkers(ctx context.Context, staleAfterSeconds float64) ([]ListSchedulableWorkersRow, error) {
+	rows, err := q.db.Query(ctx, listSchedulableWorkers, staleAfterSeconds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSchedulableWorkersRow{}
+	for rows.Next() {
+		var i ListSchedulableWorkersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slots,
+			&i.ActiveJobs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkers = `-- name: ListWorkers :many
 SELECT workers.id, workers.name, workers.slots, workers.cpu_millis, workers.memory_mb, workers.metadata, workers.registered_at, workers.last_heartbeat_at, workers.cpu_used_percent, workers.memory_used_mb, now()::timestamptz AS db_now
 FROM workers
@@ -189,4 +235,15 @@ func (q *Queries) UpsertWorker(ctx context.Context, arg UpsertWorkerParams) (Wor
 		&i.MemoryUsedMB,
 	)
 	return i, err
+}
+
+const workerExists = `-- name: WorkerExists :one
+SELECT EXISTS (SELECT 1 FROM workers WHERE id = $1) AS found
+`
+
+func (q *Queries) WorkerExists(ctx context.Context, id uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, workerExists, id)
+	var found bool
+	err := row.Scan(&found)
+	return found, err
 }

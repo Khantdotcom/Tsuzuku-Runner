@@ -193,3 +193,16 @@ func (q *Queries) ListLogChunks(ctx context.Context, arg ListLogChunksParams) ([
 	}
 	return items, nil
 }
+
+const nextAttemptNumber = `-- name: NextAttemptNumber :one
+SELECT (coalesce(max(attempt_number), 0) + 1)::integer AS next
+FROM job_attempts
+WHERE job_id = $1
+`
+
+func (q *Queries) NextAttemptNumber(ctx context.Context, jobID uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, nextAttemptNumber, jobID)
+	var next int32
+	err := row.Scan(&next)
+	return next, err
+}
