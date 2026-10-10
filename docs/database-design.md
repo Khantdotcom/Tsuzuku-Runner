@@ -96,7 +96,22 @@ erDiagram
 | A delivery is sent at most once                 | `UNIQUE (deliveries.idempotency_key)`                             |
 | Artifact names are unique per job and attempt   | `UNIQUE NULLS NOT DISTINCT (job_id, attempt_id, name)`            |
 
-State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = $1 AND state = $from`). If another actor changed the job first, the update matches no row and the caller sees `pgx.ErrNoRows` instead of silently overwriting the newer state. The transition and its history row are written in the same transaction (`store.WithTx`).
+State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = $1 AND state = $from`). If another actor changed the job first, the update matches no row and the caller sees `pgx.ErrNoRows` instead of silently overwriting the newer state. Only `job.Transition` calls it: it checks the legal transitions first, then writes the update, its history row, and a `job.state_changed` event in one transaction (`store.WithTx`), and turns a missed update into `ErrConflict` or `ErrNotFound` ([ADR 0004](adr/0004-job-state-machine.md)).
+
+`TransitionJob` also maintains the job's timestamps: `started_at` is set the first time the job enters `PREPARING` and never changes after that, and `finished_at` is set when it enters `COMPLETED`, `FAILED`, or `CANCELLED`.
+
+## Read paths
+
+| Query                         | Used for                                                                   |
+| ----------------------------- | -------------------------------------------------------------------------- |
+| `GetWorkloadByIdempotencyKey` | Replaying a submission that reuses an `Idempotency-Key`                    |
+| `GetJobByNumber`              | Looking a job up by its `#number`                                          |
+| `ListJobs`                    | Newest-first listing with an optional state filter; `before` is a job number cursor |
+| `ListJobEvents`               | Timeline after an event ID; the last ID returned is the next cursor        |
+| `ListLogChunks`               | Log output after a chunk ID, with a row limit                              |
+| `ListAttempts`                | A job's attempts in order                                                  |
+
+Cursors are the `bigint` keys (`jobs.number`, `job_events.id`, `log_chunks.id`), so paging stays stable while new rows arrive and needs no `OFFSET`.
 
 ## Local development
 

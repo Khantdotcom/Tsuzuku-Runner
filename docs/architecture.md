@@ -63,8 +63,62 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `POST /api/v1/workers/register`       | worker token | Register or re-register a worker; returns its ID           |
 | `POST /api/v1/workers/{id}/heartbeat` | worker token | Report liveness and host usage; `404` if the ID is unknown |
 | `GET /api/v1/workers`                 | none         | List workers with capacity, usage, and online status       |
+| `POST /api/v1/workloads`              | none         | Submit a workload; creates a `QUEUED` job                  |
+| `GET /api/v1/jobs`                    | none         | List jobs newest first (`state`, `limit`, `before` cursor) |
+| `GET /api/v1/jobs/{id}`               | none         | Job with its workload and state history                    |
+| `GET /api/v1/jobs/{id}/attempts`      | none         | Attempts in order                                          |
+| `GET /api/v1/jobs/{id}/events`        | none         | Timeline events after an `after` cursor                    |
+| `GET /api/v1/jobs/{id}/logs`          | none         | Log chunks after an `after` cursor (data is base64)        |
 
 Workers authenticate with a shared bearer token (`TSUZUKU_WORKER_TOKEN`), compared in constant time. Request and response types for the worker endpoints live in `internal/workerapi`, which both binaries import.
+
+`{id}` is a job UUID or its number, so `/api/v1/jobs/42` works. The submission and job endpoints have no authentication yet; every port binds to localhost only, and client authentication is a later milestone.
+
+## Workload submission
+
+`POST /api/v1/workloads` takes a JSON body:
+
+| Field                       | Required | Default        | Rules                                                          |
+| --------------------------- | -------- | -------------- | -------------------------------------------------------------- |
+| `repository`                | yes      |                | `https://` URL without credentials, query, or fragment         |
+| `revision`                  | yes      |                | Branch, tag, or commit                                         |
+| `command`                   | yes      |                | Up to 4096 characters                                          |
+| `acceptance_criteria`       | no       | `[]`           | Up to 20 entries of up to 500 characters                       |
+| `resources.cpu`             | no       | 1 core         | 0.1 core up to `TSUZUKU_WORKLOAD_MAX_CPU_MILLIS`               |
+| `resources.memory_mb`       | no       | 1024           | 64 up to `TSUZUKU_WORKLOAD_MAX_MEMORY_MB`                      |
+| `timeout_seconds`           | no       | 600            | 1 up to `TSUZUKU_WORKLOAD_MAX_TIMEOUT`                         |
+| `runtime.image`             | no       | `golang:1.27`  | Official `golang`, `node`, or `python` image; no tag means `latest` |
+| `runtime.network`           | no       | `true`         |                                                                |
+| `verification.command`      | no       |                | Run after `command` when given                                 |
+
+Defaults above a configured maximum are lowered to it. Unknown fields and wrong types are rejected with `400`; values that break a rule return `422` with the field named in `detail`. The normalized spec, with every default filled in, is stored as `workloads.spec`.
+
+A successful submission returns `201 Created`, a `Location` header, and the job. An optional `Idempotency-Key` header (1–255 visible ASCII characters) makes retries safe: the same key with the same normalized spec returns the original job with `200 OK` and `Idempotent-Replayed: true`; the same key with a different spec returns `409 Conflict`.
+
+## Job lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED: submitted
+    QUEUED --> SCHEDULED
+    SCHEDULED --> PREPARING
+    PREPARING --> EXECUTING
+    EXECUTING --> VERIFYING
+    VERIFYING --> COMPLETED
+    PREPARING --> FAILED
+    EXECUTING --> FAILED
+    VERIFYING --> FAILED
+    QUEUED --> CANCELLED
+    SCHEDULED --> CANCELLED
+    PREPARING --> CANCELLED
+    EXECUTING --> CANCELLED
+    VERIFYING --> CANCELLED
+    COMPLETED --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
+```
+
+`internal/job` owns the table of legal transitions; every change goes through `job.Transition`, which applies a compare-and-set update and records the history row and a timeline event in the same transaction ([ADR 0004](adr/0004-job-state-machine.md)). `RETRYING`, `REPAIRING`, and `BLOCKED` exist in the schema but have no edges until the milestones that use them.
 
 ## Worker lifecycle
 
@@ -142,4 +196,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Sections still to come: job state machine, scheduling and claiming, runtime isolation, verification, and evidence.
+Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has started with workload submission, the job state machine, and the job read endpoints. Sections still to come: scheduling and claiming, runtime isolation, verification, and evidence.

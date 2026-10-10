@@ -41,7 +41,19 @@ docker compose up --build
 This starts PostgreSQL, applies migrations, then runs the API server, two workers (`worker-01`, `worker-02`), and the dashboard:
 
 - Dashboard: <http://localhost:3000>
-- API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`)
+- API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`, `/api/v1/jobs`)
+
+Submit a workload; it is stored as a `QUEUED` job:
+
+```bash
+curl -i http://localhost:8080/api/v1/workloads \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: first-run' \
+  -d '{"repository":"https://github.com/Khantdotcom/Tsuzuku-Runner","revision":"main","command":"go test ./..."}'
+curl 'http://localhost:8080/api/v1/jobs?state=QUEUED'
+```
+
+Sending the same request again with the same `Idempotency-Key` returns the same job instead of creating another. See [Workload submission](docs/architecture.md#workload-submission) for every field and its default.
 
 Stop a worker with `docker compose stop worker-02` and the dashboard shows it `offline` within about 15 seconds; `docker compose start worker-02` brings it back with the same ID. `docker compose down` stops the stack and keeps the database; add `-v` to wipe it.
 
@@ -96,13 +108,13 @@ The `:docker` variants need only Docker and Task. Use them where host toolchains
 
 ### Configuration
 
-All configuration comes from environment variables prefixed with `TSUZUKU_`. See [`.env.example`](.env.example) for the full list and defaults.
+All configuration comes from environment variables prefixed with `TSUZUKU_`. See [`.env.example`](.env.example) for the full list and defaults. The per-workload maximums (`TSUZUKU_WORKLOAD_MAX_CPU_MILLIS`, `TSUZUKU_WORKLOAD_MAX_MEMORY_MB`, `TSUZUKU_WORKLOAD_MAX_TIMEOUT`) default to 4 cores, 8 GiB, and one hour.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
-- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md)
+- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) and how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency
 
 ## License
 
