@@ -36,6 +36,7 @@ type WorkerStore interface {
 	UpsertWorker(ctx context.Context, arg db.UpsertWorkerParams) (db.Worker, error)
 	RecordHeartbeat(ctx context.Context, arg db.RecordHeartbeatParams) (int64, error)
 	ListWorkers(ctx context.Context) ([]db.ListWorkersRow, error)
+	WorkerExists(ctx context.Context, id uuid.UUID) (bool, error)
 }
 
 // workerView is the public representation of a worker.

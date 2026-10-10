@@ -18,6 +18,12 @@ type Config struct {
 	DB      Pinger
 	Workers WorkerStore
 	Jobs    JobService
+	Claimer Claimer
+	// Assignments, if set, wakes waiting claims as soon as jobs are scheduled.
+	Assignments AssignmentSignal
+	// Stopping, if set, is closed when the server starts shutting down, so
+	// waiting claims return instead of holding shutdown up.
+	Stopping <-chan struct{}
 	// WorkerToken is the shared bearer token workers must present.
 	WorkerToken string
 	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
@@ -31,6 +37,9 @@ type server struct {
 	db               Pinger
 	workers          WorkerStore
 	jobs             JobService
+	claimer          Claimer
+	assignments      AssignmentSignal
+	stopping         <-chan struct{}
 	workerStaleAfter time.Duration
 	workloadLimits   workload.Limits
 }
@@ -42,6 +51,9 @@ func NewRouter(cfg Config) http.Handler {
 		db:               cfg.DB,
 		workers:          cfg.Workers,
 		jobs:             cfg.Jobs,
+		claimer:          cfg.Claimer,
+		assignments:      cfg.Assignments,
+		stopping:         cfg.Stopping,
 		workerStaleAfter: cfg.WorkerStaleAfter,
 		workloadLimits:   cfg.WorkloadLimits,
 	}
@@ -76,6 +88,7 @@ func NewRouter(cfg Config) http.Handler {
 			r.Use(requireWorkerToken(cfg.WorkerToken))
 			r.Post("/workers/register", s.handleRegisterWorker)
 			r.Post("/workers/{id}/heartbeat", s.handleHeartbeat)
+			r.Post("/workers/{id}/claim", s.handleClaim)
 		})
 	})
 

@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/scheduler"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/storetest"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/worker"
@@ -40,18 +42,28 @@ type listedWorker struct {
 
 func newServer(t *testing.T, staleAfter time.Duration) *httptest.Server {
 	t.Helper()
+	srv, _, _ := newServerWithPool(t, staleAfter)
+	return srv
+}
+
+func newServerWithPool(t *testing.T, staleAfter time.Duration) (*httptest.Server, *pgxpool.Pool, *scheduler.Notifier) {
+	t.Helper()
 	pool := storetest.NewPool(t)
+	jobs := job.NewService(pool)
+	notifier := scheduler.NewNotifier()
 	srv := httptest.NewServer(api.NewRouter(api.Config{
 		Logger:           slog.New(slog.DiscardHandler),
 		DB:               pool,
 		Workers:          db.New(pool),
-		Jobs:             job.NewService(pool),
+		Jobs:             jobs,
+		Claimer:          jobs,
+		Assignments:      notifier,
 		WorkerToken:      token,
 		WorkerStaleAfter: staleAfter,
 		WorkloadLimits:   workload.DefaultLimits(),
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, pool, notifier
 }
 
 // post sends body as JSON with the worker token, decodes a 200 response into

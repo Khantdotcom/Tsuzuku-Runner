@@ -15,6 +15,7 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/scheduler"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
@@ -43,11 +44,18 @@ func run() error {
 	}
 	defer pool.Close()
 
+	jobs := job.NewService(pool)
+	assignments := scheduler.NewNotifier()
+	stopping := make(chan struct{})
+
 	router := api.NewRouter(api.Config{
 		Logger:           logger,
 		DB:               pool,
 		Workers:          db.New(pool),
-		Jobs:             job.NewService(pool),
+		Jobs:             jobs,
+		Claimer:          jobs,
+		Assignments:      assignments,
+		Stopping:         stopping,
 		WorkerToken:      cfg.Token,
 		WorkerStaleAfter: cfg.WorkerStaleAfter,
 		WorkloadLimits: workload.Limits{
@@ -64,6 +72,24 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	srv.RegisterOnShutdown(func() { close(stopping) })
+
+	sched := scheduler.New(pool, logger, scheduler.Options{
+		Interval:   cfg.SchedulerInterval,
+		StaleAfter: cfg.WorkerStaleAfter,
+		Notifier:   assignments,
+	})
+	schedCtx, stopSched := context.WithCancel(ctx)
+	schedDone := make(chan struct{})
+	go func() {
+		defer close(schedDone)
+		sched.Run(schedCtx)
+	}()
+	// Runs before pool.Close, so no scheduling round outlives the pool.
+	defer func() {
+		stopSched()
+		<-schedDone
+	}()
 
 	serveErr := make(chan error, 1)
 	go func() {

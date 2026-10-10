@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 )
 
@@ -32,6 +34,12 @@ type fakeWorkerStore struct {
 	heartbeatErr  error
 	rows          []db.ListWorkersRow
 	listErr       error
+	missing       bool
+	existsErr     error
+}
+
+func (f *fakeWorkerStore) WorkerExists(context.Context, uuid.UUID) (bool, error) {
+	return !f.missing, f.existsErr
 }
 
 func (f *fakeWorkerStore) UpsertWorker(_ context.Context, arg db.UpsertWorkerParams) (db.Worker, error) {
