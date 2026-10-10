@@ -43,14 +43,14 @@ This starts PostgreSQL, applies migrations, then runs the API server, two worker
 - Dashboard: <http://localhost:3000>
 - API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`, `/api/v1/jobs`)
 
-Submit a workload; it is stored as a `QUEUED` job:
+Submit a workload; it is stored as a `QUEUED` job, and within about a second the scheduler places it on a worker (`SCHEDULED`). Workers start running jobs once container execution lands; until then jobs wait in `SCHEDULED`:
 
 ```bash
 curl -i http://localhost:8080/api/v1/workloads \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: first-run' \
   -d '{"repository":"https://github.com/Khantdotcom/Tsuzuku-Runner","revision":"main","command":"go test ./..."}'
-curl 'http://localhost:8080/api/v1/jobs?state=QUEUED'
+curl 'http://localhost:8080/api/v1/jobs?state=SCHEDULED'
 ```
 
 Sending the same request again with the same `Idempotency-Key` returns the same job instead of creating another. See [Workload submission](docs/architecture.md#workload-submission) for every field and its default.

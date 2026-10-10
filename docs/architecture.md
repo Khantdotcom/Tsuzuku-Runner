@@ -62,6 +62,7 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `GET /readyz`                         | none         | Readiness: the database answers a ping within 2s           |
 | `POST /api/v1/workers/register`       | worker token | Register or re-register a worker; returns its ID           |
 | `POST /api/v1/workers/{id}/heartbeat` | worker token | Report liveness and host usage; `404` if the ID is unknown |
+| `POST /api/v1/workers/{id}/claim`     | worker token | Start the worker's next assigned job; long-polls with `?wait=` |
 | `GET /api/v1/workers`                 | none         | List workers with capacity, usage, and online status       |
 | `POST /api/v1/workloads`              | none         | Submit a workload; creates a `QUEUED` job                  |
 | `GET /api/v1/jobs`                    | none         | List jobs newest first (`state`, `limit`, `before` cursor) |
@@ -119,6 +120,46 @@ stateDiagram-v2
 ```
 
 `internal/job` owns the table of legal transitions; every change goes through `job.Transition`, which applies a compare-and-set update and records the history row and a timeline event in the same transaction ([ADR 0004](adr/0004-job-state-machine.md)). `RETRYING`, `REPAIRING`, and `BLOCKED` exist in the schema but have no edges until the milestones that use them.
+
+## Scheduling and claiming
+
+Placement and starting are separate steps ([ADR 0003](adr/0003-postgres-as-job-queue.md)): the scheduler decides where a job runs, and the assigned worker claims it when it is ready.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API server
+    participant S as Scheduler
+    participant DB as PostgreSQL
+    participant W as Worker
+    C->>A: POST /workloads
+    A->>DB: workload + job (QUEUED)
+    W->>A: POST /workers/{id}/claim?wait=25s
+    Note over A,W: request held open
+    loop every TSUZUKU_SCHEDULER_INTERVAL
+        S->>DB: advisory lock, online workers, oldest QUEUED jobs (SKIP LOCKED)
+        S->>DB: QUEUED to SCHEDULED, assigned_worker_id set
+    end
+    S-->>A: wake waiting claims
+    A->>DB: lock assigned job, create attempt, SCHEDULED to PREPARING
+    A-->>W: 200 job, attempt, workload spec
+```
+
+**Scheduler.** One loop inside `server` runs a round every `TSUZUKU_SCHEDULER_INTERVAL` (1s by default). Each round is one transaction:
+
+1. Take the advisory lock with `pg_try_advisory_xact_lock`. If another server replica holds it, skip the round. The lock is released at commit, so a crashed replica never leaves it held.
+2. Load online workers (same database-clock rule as `/workers`) and count their unfinished jobs (`SCHEDULED` through `VERIFYING`).
+3. Lock up to 100 of the oldest placeable `QUEUED` jobs (`scheduled_at` empty or past) with `FOR UPDATE SKIP LOCKED`.
+4. Place each job, oldest first, on the worker with the fewest unfinished jobs that still has a free slot; ties go to the earliest-registered worker.
+5. Move each placed job to `SCHEDULED` with its worker, recording a reason such as `placed on worker-01 (0 of 2 slots busy)`.
+
+The advisory lock matters even with `SKIP LOCKED`: two rounds running at once would each see the same free slots and lock different jobs, overfilling the worker. Placement counts slots only; CPU- and memory-aware placement comes later.
+
+**Claiming.** `POST /api/v1/workers/{id}/claim` locks the worker's oldest `SCHEDULED` job with `FOR UPDATE SKIP LOCKED`, creates the next `job_attempts` row, and moves the job to `PREPARING` in one transaction, so concurrent claims never start the same job twice. It returns the job, the attempt, and the normalized workload spec, or `204 No Content` when nothing is assigned.
+
+With `?wait=25s` (at most 30s) the request is held open until a job is assigned. The scheduler wakes waiting claims in the same process as soon as it commits; claims also re-check every 2 seconds, which covers assignments made by another replica. When the server starts shutting down, waiting claims return `204` immediately instead of delaying shutdown.
+
+**Not yet handled.** Jobs assigned to a worker that goes offline stay `SCHEDULED`, and a claim whose response never reaches the worker leaves the job in `PREPARING`. Leases with expiry and reassignment, described in ADR 0003, arrive with recovery in a later milestone. The worker agent starts claiming once it can run jobs in a container.
 
 ## Worker lifecycle
 
@@ -196,4 +237,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has started with workload submission, the job state machine, and the job read endpoints. Sections still to come: scheduling and claiming, runtime isolation, verification, and evidence.
+Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 has started with workload submission, the job state machine, the job read endpoints, and scheduling and claiming. Sections still to come: runtime isolation, verification, and evidence.

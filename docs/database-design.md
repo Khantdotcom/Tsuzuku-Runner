@@ -98,7 +98,7 @@ erDiagram
 
 State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = $1 AND state = $from`). If another actor changed the job first, the update matches no row and the caller sees `pgx.ErrNoRows` instead of silently overwriting the newer state. Only `job.Transition` calls it: it checks the legal transitions first, then writes the update, its history row, and a `job.state_changed` event in one transaction (`store.WithTx`), and turns a missed update into `ErrConflict` or `ErrNotFound` ([ADR 0004](adr/0004-job-state-machine.md)).
 
-`TransitionJob` also maintains the job's timestamps: `started_at` is set the first time the job enters `PREPARING` and never changes after that, and `finished_at` is set when it enters `COMPLETED`, `FAILED`, or `CANCELLED`.
+`TransitionJob` can also set `assigned_worker_id` in the same statement, so a job is never `SCHEDULED` without its worker. It also maintains the job's timestamps: `started_at` is set the first time the job enters `PREPARING` and never changes after that, and `finished_at` is set when it enters `COMPLETED`, `FAILED`, or `CANCELLED`.
 
 ## Read paths
 
@@ -110,6 +110,18 @@ State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = 
 | `ListJobEvents`               | Timeline after an event ID; the last ID returned is the next cursor        |
 | `ListLogChunks`               | Log output after a chunk ID, with a row limit                              |
 | `ListAttempts`                | A job's attempts in order                                                  |
+
+## Queue paths
+
+| Query                    | Used for                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------- |
+| `TryLockScheduler`       | `pg_try_advisory_xact_lock`: one scheduling round at a time across replicas, released at commit |
+| `ListSchedulableWorkers` | Online workers (database clock) with their count of unfinished jobs                        |
+| `LockQueuedJobs`         | Oldest placeable `QUEUED` jobs, `FOR UPDATE SKIP LOCKED`; served by `jobs_queue_idx`         |
+| `LockNextAssignedJob`    | A worker's oldest `SCHEDULED` job, `FOR UPDATE SKIP LOCKED`; served by `jobs_assigned_worker_idx` |
+| `NextAttemptNumber`      | The next attempt number for a job; `UNIQUE (job_id, attempt_number)` backs it up            |
+
+`SKIP LOCKED` lets concurrent claimers pass over a row another transaction is taking instead of queueing behind it. A claim that finds nothing locked or assigned returns no row rather than waiting.
 
 Cursors are the `bigint` keys (`jobs.number`, `job_events.id`, `log_chunks.id`), so paging stays stable while new rows arrive and needs no `OFFSET`.
 
