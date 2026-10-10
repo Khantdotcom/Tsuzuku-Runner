@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,6 +83,54 @@ func (q *Queries) AppendLogChunk(ctx context.Context, arg AppendLogChunkParams) 
 	return i, err
 }
 
+const attemptLogBytes = `-- name: AttemptLogBytes :one
+SELECT coalesce(sum(octet_length(data)), 0)::bigint AS total
+FROM log_chunks
+WHERE attempt_id = $1
+`
+
+func (q *Queries) AttemptLogBytes(ctx context.Context, attemptID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, attemptLogBytes, attemptID)
+	var total int64
+	err := row.Scan(&total)
+	return total, err
+}
+
+const createArtifact = `-- name: CreateArtifact :execrows
+INSERT INTO artifacts (id, job_id, attempt_id, name, content_type, storage_key, size_bytes, sha256)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT DO NOTHING
+`
+
+type CreateArtifactParams struct {
+	ID          uuid.UUID
+	JobID       uuid.UUID
+	AttemptID   *uuid.UUID
+	Name        string
+	ContentType string
+	StorageKey  string
+	SizeBytes   int64
+	Sha256      string
+}
+
+// CreateArtifact ignores a second row for the same job, attempt, and name.
+func (q *Queries) CreateArtifact(ctx context.Context, arg CreateArtifactParams) (int64, error) {
+	result, err := q.db.Exec(ctx, createArtifact,
+		arg.ID,
+		arg.JobID,
+		arg.AttemptID,
+		arg.Name,
+		arg.ContentType,
+		arg.StorageKey,
+		arg.SizeBytes,
+		arg.Sha256,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createAttempt = `-- name: CreateAttempt :one
 INSERT INTO job_attempts (id, job_id, attempt_number, worker_id)
 VALUES ($1, $2, $3, $4)
@@ -115,6 +164,32 @@ func (q *Queries) CreateAttempt(ctx context.Context, arg CreateAttemptParams) (J
 		&i.FinishedAt,
 	)
 	return i, err
+}
+
+const createFailure = `-- name: CreateFailure :exec
+INSERT INTO failures (id, job_id, attempt_id, category, message, details)
+VALUES ($1, $2, $3, $4, $5, $6)
+`
+
+type CreateFailureParams struct {
+	ID        uuid.UUID
+	JobID     uuid.UUID
+	AttemptID *uuid.UUID
+	Category  string
+	Message   string
+	Details   json.RawMessage
+}
+
+func (q *Queries) CreateFailure(ctx context.Context, arg CreateFailureParams) error {
+	_, err := q.db.Exec(ctx, createFailure,
+		arg.ID,
+		arg.JobID,
+		arg.AttemptID,
+		arg.Category,
+		arg.Message,
+		arg.Details,
+	)
+	return err
 }
 
 const createRuntime = `-- name: CreateRuntime :one
@@ -174,6 +249,80 @@ func (q *Queries) CreateRuntime(ctx context.Context, arg CreateRuntimeParams) (R
 	return i, err
 }
 
+const createVerificationCheck = `-- name: CreateVerificationCheck :exec
+INSERT INTO verification_checks (
+    id, verification_run_id, name, kind, command, status, exit_code, output, started_at, finished_at
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7,
+    $8, $9, $10
+)
+`
+
+type CreateVerificationCheckParams struct {
+	ID                uuid.UUID
+	VerificationRunID uuid.UUID
+	Name              string
+	Kind              string
+	Command           *string
+	Status            string
+	ExitCode          *int32
+	Output            string
+	StartedAt         *time.Time
+	FinishedAt        *time.Time
+}
+
+func (q *Queries) CreateVerificationCheck(ctx context.Context, arg CreateVerificationCheckParams) error {
+	_, err := q.db.Exec(ctx, createVerificationCheck,
+		arg.ID,
+		arg.VerificationRunID,
+		arg.Name,
+		arg.Kind,
+		arg.Command,
+		arg.Status,
+		arg.ExitCode,
+		arg.Output,
+		arg.StartedAt,
+		arg.FinishedAt,
+	)
+	return err
+}
+
+const createVerificationRun = `-- name: CreateVerificationRun :one
+INSERT INTO verification_runs (id, job_id, attempt_id, status, started_at, finished_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, job_id, attempt_id, status, started_at, finished_at
+`
+
+type CreateVerificationRunParams struct {
+	ID         uuid.UUID
+	JobID      uuid.UUID
+	AttemptID  uuid.UUID
+	Status     string
+	StartedAt  time.Time
+	FinishedAt *time.Time
+}
+
+func (q *Queries) CreateVerificationRun(ctx context.Context, arg CreateVerificationRunParams) (VerificationRun, error) {
+	row := q.db.QueryRow(ctx, createVerificationRun,
+		arg.ID,
+		arg.JobID,
+		arg.AttemptID,
+		arg.Status,
+		arg.StartedAt,
+		arg.FinishedAt,
+	)
+	var i VerificationRun
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.AttemptID,
+		&i.Status,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const finishAttempt = `-- name: FinishAttempt :one
 UPDATE job_attempts
 SET status      = $1,
@@ -208,6 +357,132 @@ func (q *Queries) FinishAttempt(ctx context.Context, arg FinishAttemptParams) (J
 	return i, err
 }
 
+const getArtifact = `-- name: GetArtifact :one
+SELECT id, job_id, attempt_id, name, content_type, storage_key, size_bytes, sha256, created_at FROM artifacts
+WHERE id = $1 AND job_id = $2
+`
+
+type GetArtifactParams struct {
+	ID    uuid.UUID
+	JobID uuid.UUID
+}
+
+func (q *Queries) GetArtifact(ctx context.Context, arg GetArtifactParams) (Artifact, error) {
+	row := q.db.QueryRow(ctx, getArtifact, arg.ID, arg.JobID)
+	var i Artifact
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.AttemptID,
+		&i.Name,
+		&i.ContentType,
+		&i.StorageKey,
+		&i.SizeBytes,
+		&i.Sha256,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const insertLogChunk = `-- name: InsertLogChunk :execrows
+INSERT INTO log_chunks (job_id, attempt_id, seq, stream, data)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (attempt_id, seq) DO NOTHING
+`
+
+type InsertLogChunkParams struct {
+	JobID     uuid.UUID
+	AttemptID uuid.UUID
+	Seq       int32
+	Stream    string
+	Data      []byte
+}
+
+// InsertLogChunk stores one chunk; a chunk re-sent with the same seq is ignored.
+func (q *Queries) InsertLogChunk(ctx context.Context, arg InsertLogChunkParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertLogChunk,
+		arg.JobID,
+		arg.AttemptID,
+		arg.Seq,
+		arg.Stream,
+		arg.Data,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const listArtifacts = `-- name: ListArtifacts :many
+SELECT id, job_id, attempt_id, name, content_type, storage_key, size_bytes, sha256, created_at FROM artifacts
+WHERE job_id = $1
+ORDER BY created_at, name
+`
+
+func (q *Queries) ListArtifacts(ctx context.Context, jobID uuid.UUID) ([]Artifact, error) {
+	rows, err := q.db.Query(ctx, listArtifacts, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Artifact{}
+	for rows.Next() {
+		var i Artifact
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.Name,
+			&i.ContentType,
+			&i.StorageKey,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAttemptLogChunks = `-- name: ListAttemptLogChunks :many
+SELECT id, job_id, attempt_id, seq, stream, data, created_at FROM log_chunks
+WHERE attempt_id = $1
+ORDER BY seq
+`
+
+func (q *Queries) ListAttemptLogChunks(ctx context.Context, attemptID uuid.UUID) ([]LogChunk, error) {
+	rows, err := q.db.Query(ctx, listAttemptLogChunks, attemptID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LogChunk{}
+	for rows.Next() {
+		var i LogChunk
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.Seq,
+			&i.Stream,
+			&i.Data,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAttempts = `-- name: ListAttempts :many
 SELECT id, job_id, attempt_number, worker_id, status, exit_code, error, started_at, finished_at FROM job_attempts
 WHERE job_id = $1
@@ -233,6 +508,71 @@ func (q *Queries) ListAttempts(ctx context.Context, jobID uuid.UUID) ([]JobAttem
 			&i.Error,
 			&i.StartedAt,
 			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCancelRequestedAttempts = `-- name: ListCancelRequestedAttempts :many
+SELECT a.id FROM job_attempts a
+JOIN jobs j ON j.id = a.job_id
+WHERE a.worker_id = $1
+  AND a.status = 'RUNNING'
+  AND j.cancel_requested_at IS NOT NULL
+ORDER BY a.started_at
+`
+
+// ListCancelRequestedAttempts returns a worker's running attempts whose job
+// has a pending cancellation request.
+func (q *Queries) ListCancelRequestedAttempts(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCancelRequestedAttempts, workerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listFailures = `-- name: ListFailures :many
+SELECT id, job_id, attempt_id, category, message, details, created_at FROM failures
+WHERE job_id = $1
+ORDER BY created_at, id
+`
+
+func (q *Queries) ListFailures(ctx context.Context, jobID uuid.UUID) ([]Failure, error) {
+	rows, err := q.db.Query(ctx, listFailures, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Failure{}
+	for rows.Next() {
+		var i Failure
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.Category,
+			&i.Message,
+			&i.Details,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -314,6 +654,77 @@ func (q *Queries) ListRuntimes(ctx context.Context, jobID uuid.UUID) ([]Runtime,
 			&i.NetworkEnabled,
 			&i.CreatedAt,
 			&i.DestroyedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVerificationChecks = `-- name: ListVerificationChecks :many
+SELECT c.id, c.verification_run_id, c.name, c.kind, c.command, c.status, c.exit_code, c.output, c.started_at, c.finished_at FROM verification_checks c
+JOIN verification_runs r ON r.id = c.verification_run_id
+WHERE r.job_id = $1
+ORDER BY c.verification_run_id, c.id
+`
+
+func (q *Queries) ListVerificationChecks(ctx context.Context, jobID uuid.UUID) ([]VerificationCheck, error) {
+	rows, err := q.db.Query(ctx, listVerificationChecks, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VerificationCheck{}
+	for rows.Next() {
+		var i VerificationCheck
+		if err := rows.Scan(
+			&i.ID,
+			&i.VerificationRunID,
+			&i.Name,
+			&i.Kind,
+			&i.Command,
+			&i.Status,
+			&i.ExitCode,
+			&i.Output,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listVerificationRuns = `-- name: ListVerificationRuns :many
+SELECT id, job_id, attempt_id, status, started_at, finished_at FROM verification_runs
+WHERE job_id = $1
+ORDER BY started_at, id
+`
+
+func (q *Queries) ListVerificationRuns(ctx context.Context, jobID uuid.UUID) ([]VerificationRun, error) {
+	rows, err := q.db.Query(ctx, listVerificationRuns, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []VerificationRun{}
+	for rows.Next() {
+		var i VerificationRun
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.Status,
+			&i.StartedAt,
+			&i.FinishedAt,
 		); err != nil {
 			return nil, err
 		}

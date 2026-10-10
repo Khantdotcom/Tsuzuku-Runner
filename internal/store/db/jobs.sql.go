@@ -543,6 +543,36 @@ func (q *Queries) RecordTransition(ctx context.Context, arg RecordTransitionPara
 	return i, err
 }
 
+const requestJobCancel = `-- name: RequestJobCancel :one
+UPDATE jobs
+SET cancel_requested_at = coalesce(cancel_requested_at, now()),
+    updated_at          = now()
+WHERE id = $1 AND state IN ('PREPARING', 'EXECUTING', 'VERIFYING')
+RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
+`
+
+// RequestJobCancel marks a running job for cancellation. It returns no row if
+// the job is not PREPARING, EXECUTING, or VERIFYING, and keeps the time of the
+// first request.
+func (q *Queries) RequestJobCancel(ctx context.Context, id uuid.UUID) (Job, error) {
+	row := q.db.QueryRow(ctx, requestJobCancel, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Number,
+		&i.WorkloadID,
+		&i.State,
+		&i.AssignedWorkerID,
+		&i.ScheduledAt,
+		&i.CancelRequestedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+	)
+	return i, err
+}
+
 const transitionJob = `-- name: TransitionJob :one
 UPDATE jobs
 SET state              = $1,

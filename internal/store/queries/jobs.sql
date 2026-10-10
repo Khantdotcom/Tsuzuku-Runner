@@ -60,6 +60,16 @@ SET state              = @to_state,
 WHERE id = @id AND state = @from_state
 RETURNING *;
 
+-- name: RequestJobCancel :one
+-- RequestJobCancel marks a running job for cancellation. It returns no row if
+-- the job is not PREPARING, EXECUTING, or VERIFYING, and keeps the time of the
+-- first request.
+UPDATE jobs
+SET cancel_requested_at = coalesce(cancel_requested_at, now()),
+    updated_at          = now()
+WHERE id = @id AND state IN ('PREPARING', 'EXECUTING', 'VERIFYING')
+RETURNING *;
+
 -- name: TryLockScheduler :one
 -- TryLockScheduler takes a transaction-level advisory lock without waiting.
 -- It returns false when another transaction holds it; the lock is released
