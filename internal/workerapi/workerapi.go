@@ -2,14 +2,40 @@
 // the API server. Both sides import it so the protocol has one definition.
 package workerapi
 
-import "github.com/google/uuid"
+import (
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
+)
 
 // RegisterPath is the endpoint a worker calls on startup.
 const RegisterPath = "/api/v1/workers/register"
 
+// MaxClaimWait is the longest a claim request may wait for a job.
+const MaxClaimWait = 30 * time.Second
+
 // HeartbeatPath returns the heartbeat endpoint for a registered worker.
 func HeartbeatPath(id uuid.UUID) string {
 	return "/api/v1/workers/" + id.String() + "/heartbeat"
+}
+
+// ClaimPath returns the endpoint a worker calls to start its next assigned
+// job. The optional wait query parameter (a duration such as "25s", at most
+// MaxClaimWait) holds the request open until a job is assigned. The server
+// answers 200 with a ClaimResponse, or 204 when no job arrived in time.
+func ClaimPath(id uuid.UUID) string {
+	return "/api/v1/workers/" + id.String() + "/claim"
+}
+
+// ClaimResponse is a job the worker has started, as attempt AttemptNumber.
+type ClaimResponse struct {
+	JobID         uuid.UUID     `json:"job_id"`
+	JobNumber     int64         `json:"job_number"`
+	AttemptID     uuid.UUID     `json:"attempt_id"`
+	AttemptNumber int           `json:"attempt_number"`
+	Spec          workload.Spec `json:"spec"`
 }
 
 // RegisterRequest announces a worker and its capacity. Registering again with

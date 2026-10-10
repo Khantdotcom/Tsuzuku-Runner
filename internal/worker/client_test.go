@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -62,6 +63,73 @@ func TestClientHeartbeat(t *testing.T) {
 	err := NewClient(srv.URL, clientToken).Heartbeat(t.Context(), id, workerapi.HeartbeatRequest{CPUUsedPercent: 50, MemoryUsedMB: 10})
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
+	}
+}
+
+func TestClientClaim(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	want := workerapi.ClaimResponse{JobID: uuid.New(), JobNumber: 3, AttemptID: uuid.New(), AttemptNumber: 1}
+	want.Spec.Command = "make"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != workerapi.ClaimPath(id) {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("wait"); got != "25s" {
+			t.Errorf("wait = %q, want 25s", got)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "Bearer "+clientToken {
+			t.Errorf("Authorization = %q", auth)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(want)
+	}))
+	defer srv.Close()
+
+	got, found, err := NewClient(srv.URL, clientToken).Claim(t.Context(), id, 25*time.Second)
+	if err != nil || !found {
+		t.Fatalf("Claim: found %v, err %v", found, err)
+	}
+	if got.JobID != want.JobID || got.AttemptID != want.AttemptID || got.Spec.Command != "make" {
+		t.Errorf("claim = %+v", got)
+	}
+}
+
+func TestClientClaimResponses(t *testing.T) {
+	respond := func(status int) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+	}
+
+	t.Run("204 means no job", func(t *testing.T) {
+		srv := respond(http.StatusNoContent)
+		defer srv.Close()
+		_, found, err := NewClient(srv.URL, clientToken).Claim(t.Context(), uuid.New(), 0)
+		if err != nil || found {
+			t.Errorf("found %v, err %v; want neither", found, err)
+		}
+	})
+	t.Run("404 is ErrUnknownWorker", func(t *testing.T) {
+		srv := respond(http.StatusNotFound)
+		defer srv.Close()
+		if _, _, err := NewClient(srv.URL, clientToken).Claim(t.Context(), uuid.New(), 0); !errors.Is(err, ErrUnknownWorker) {
+			t.Errorf("err = %v, want ErrUnknownWorker", err)
+		}
+	})
+	t.Run("500 is an APIError", func(t *testing.T) {
+		srv := respond(http.StatusInternalServerError)
+		defer srv.Close()
+		_, _, err := NewClient(srv.URL, clientToken).Claim(t.Context(), uuid.New(), 0)
+		if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Status != http.StatusInternalServerError {
+			t.Errorf("err = %v, want a 500 APIError", err)
+		}
+	})
+}
+
+func TestClientClaimOutlivesShortRequestTimeout(t *testing.T) {
+	client := NewClient("http://unused", clientToken)
+	if client.longPoll.Timeout != 0 {
+		t.Errorf("long-poll client timeout = %s; a fixed timeout would cut off waits longer than it", client.longPoll.Timeout)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,14 +45,45 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// longPoll has no overall timeout; each claim sets its own deadline.
+	longPoll *http.Client
 }
 
 // NewClient returns a client for the API at baseURL that authenticates with token.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
-		http:    &http.Client{Timeout: requestTimeout},
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		token:    token,
+		http:     &http.Client{Timeout: requestTimeout},
+		longPoll: &http.Client{},
+	}
+}
+
+// Claim starts the worker's next assigned job, waiting up to wait for one to
+// be assigned. found is false when none arrived in time.
+func (c *Client) Claim(ctx context.Context, id uuid.UUID, wait time.Duration) (claim workerapi.ClaimResponse, found bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, wait+requestTimeout)
+	defer cancel()
+
+	path := workerapi.ClaimPath(id) + "?wait=" + url.QueryEscape(wait.String())
+	resp, err := c.send(ctx, c.longPoll, path, struct{}{})
+	if err != nil {
+		return claim, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return claim, false, nil
+	case http.StatusOK:
+		if err := json.NewDecoder(resp.Body).Decode(&claim); err != nil {
+			return claim, false, fmt.Errorf("decode claim: %w", err)
+		}
+		return claim, true, nil
+	case http.StatusNotFound:
+		return claim, false, ErrUnknownWorker
+	default:
+		return claim, false, apiError(resp)
 	}
 }
 
@@ -72,30 +104,14 @@ func (c *Client) Heartbeat(ctx context.Context, id uuid.UUID, req workerapi.Hear
 }
 
 func (c *Client) post(ctx context.Context, path string, body any, want int, out any) error {
-	payload, err := json.Marshal(body)
+	resp, err := c.send(ctx, c.http, path, body)
 	if err != nil {
-		return fmt.Errorf("encode request: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("post %s: %w", path, err)
+		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != want {
-		var p struct {
-			Detail string `json:"detail"`
-		}
-		_ = json.NewDecoder(io.LimitReader(resp.Body, maxErrorBodySize)).Decode(&p)
-		return &APIError{Status: resp.StatusCode, Detail: p.Detail}
+		return apiError(resp)
 	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -103,4 +119,33 @@ func (c *Client) post(ctx context.Context, path string, body any, want int, out 
 		}
 	}
 	return nil
+}
+
+// send posts body as JSON with the worker token. The caller closes the body.
+func (c *Client) send(ctx context.Context, client *http.Client, path string, body any) (*http.Response, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encode request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("post %s: %w", path, err)
+	}
+	return resp, nil
+}
+
+func apiError(resp *http.Response) error {
+	var p struct {
+		Detail string `json:"detail"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, maxErrorBodySize)).Decode(&p)
+	return &APIError{Status: resp.StatusCode, Detail: p.Detail}
 }
