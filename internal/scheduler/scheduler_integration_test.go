@@ -55,7 +55,7 @@ func submit(t *testing.T, pool *pgxpool.Pool, n int) []uuid.UUID {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sub, err := svc.Submit(t.Context(), spec, "")
+		sub, err := svc.Submit(t.Context(), spec, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}

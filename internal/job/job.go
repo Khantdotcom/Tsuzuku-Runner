@@ -9,6 +9,7 @@ import (
 	"maps"
 	"reflect"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -214,7 +215,8 @@ func NewService(pool *pgxpool.Pool, opts ...Option) *Service {
 // and a creation event, all in one transaction. With a non-empty
 // idempotencyKey, a repeated identical submission returns the original job,
 // and a different submission under the same key returns ErrIdempotencyMismatch.
-func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey string) (Submission, error) {
+// scheduledAt, when set, is when the scheduler may place the job; nil means now.
+func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (Submission, error) {
 	if idempotencyKey != "" {
 		sub, found, err := s.replay(ctx, spec, idempotencyKey)
 		if err != nil || found {
@@ -222,7 +224,7 @@ func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey
 		}
 	}
 
-	detail, err := s.create(ctx, spec, idempotencyKey)
+	detail, err := s.create(ctx, spec, idempotencyKey, scheduledAt)
 	var pgErr *pgconn.PgError
 	if idempotencyKey != "" && errors.As(err, &pgErr) && pgErr.ConstraintName == idempotencyKeyConstraint {
 		// A concurrent request with the same key committed first.
@@ -238,7 +240,43 @@ func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey
 	return Submission{Detail: detail}, nil
 }
 
-func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey string) (Detail, error) {
+// Stats counts jobs grouped for the dashboard.
+type Stats struct {
+	Queued    int64 `json:"queued"`
+	Scheduled int64 `json:"scheduled"`
+	Running   int64 `json:"running"`
+	Completed int64 `json:"completed"`
+	Failed    int64 `json:"failed"`
+	Cancelled int64 `json:"cancelled"`
+}
+
+// Stats returns how many jobs are in each dashboard bucket.
+func (s *Service) Stats(ctx context.Context) (Stats, error) {
+	rows, err := s.q.CountJobsByState(ctx)
+	if err != nil {
+		return Stats{}, fmt.Errorf("count jobs by state: %w", err)
+	}
+	var out Stats
+	for _, row := range rows {
+		switch State(row.State) {
+		case Queued:
+			out.Queued = row.Count
+		case Scheduled:
+			out.Scheduled = row.Count
+		case Preparing, Executing, Verifying:
+			out.Running += row.Count
+		case Completed:
+			out.Completed = row.Count
+		case Failed:
+			out.Failed = row.Count
+		case Cancelled:
+			out.Cancelled = row.Count
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (Detail, error) {
 	rawSpec, err := json.Marshal(spec)
 	if err != nil {
 		return Detail{}, fmt.Errorf("encode workload spec: %w", err)
@@ -277,12 +315,16 @@ func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey
 		if err != nil {
 			return fmt.Errorf("create workload: %w", err)
 		}
-		d.Job, err = q.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkloadID: workloadID})
+		d.Job, err = q.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkloadID: workloadID, ScheduledAt: scheduledAt})
 		if err != nil {
 			return fmt.Errorf("create job: %w", err)
 		}
+		reason := "workload submitted"
+		if scheduledAt != nil {
+			reason = "workload submitted, scheduled for " + scheduledAt.UTC().Format(time.RFC3339)
+		}
 		tr, err := q.RecordTransition(ctx, db.RecordTransitionParams{
-			JobID: jobID, ToState: d.Job.State, Actor: ActorAPI, Reason: "workload submitted",
+			JobID: jobID, ToState: d.Job.State, Actor: ActorAPI, Reason: reason,
 		})
 		if err != nil {
 			return fmt.Errorf("record transition: %w", err)

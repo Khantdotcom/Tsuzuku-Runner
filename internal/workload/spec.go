@@ -62,6 +62,26 @@ type Request struct {
 	TimeoutSeconds     *int                 `json:"timeout_seconds"`
 	Runtime            *RuntimeRequest      `json:"runtime"`
 	Verification       *VerificationRequest `json:"verification"`
+	// ScheduledAt, when set, is when the job becomes placeable. It is not part
+	// of the normalized Spec: idempotent replays compare Spec only.
+	ScheduledAt *time.Time `json:"scheduled_at"`
+}
+
+// scheduleSkew is how far in the past a scheduled_at may be, so a client
+// whose clock is slightly behind the server is still accepted.
+const scheduleSkew = 5 * time.Second
+
+// ValidateScheduledAt reports whether r.ScheduledAt is usable. A nil value
+// means run as soon as a worker is free. Past times (beyond a small skew) are
+// rejected.
+func (r Request) ValidateScheduledAt(now time.Time) error {
+	if r.ScheduledAt == nil {
+		return nil
+	}
+	if r.ScheduledAt.Before(now.Add(-scheduleSkew)) {
+		return errors.New("scheduled_at must be in the future")
+	}
+	return nil
 }
 
 // ResourcesRequest is the requested CPU (in cores) and memory.

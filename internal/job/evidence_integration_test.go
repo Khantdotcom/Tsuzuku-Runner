@@ -25,7 +25,7 @@ import (
 func claimSpec(t *testing.T, pool *pgxpool.Pool, svc *job.Service, spec workload.Spec) (uuid.UUID, job.Claimed) {
 	t.Helper()
 	w := addWorker(t, pool, "runner-"+uuid.NewString()[:8])
-	sub, err := svc.Submit(t.Context(), spec, "")
+	sub, err := svc.Submit(t.Context(), spec, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestFailuresAreClassified(t *testing.T) {
 func TestCancelJobThatHasNotStarted(t *testing.T) {
 	pool := storetest.NewPool(t)
 	svc := job.NewService(pool)
-	sub, err := svc.Submit(t.Context(), newSpec(t, "make"), "")
+	sub, err := svc.Submit(t.Context(), newSpec(t, "make"), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

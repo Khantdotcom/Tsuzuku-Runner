@@ -202,6 +202,25 @@ func TestNormalizeAcceptsBoundaryValues(t *testing.T) {
 	}
 }
 
+func TestValidateScheduledAt(t *testing.T) {
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	if err := (Request{}).ValidateScheduledAt(now); err != nil {
+		t.Fatalf("nil scheduled_at: %v", err)
+	}
+	future := now.Add(time.Minute)
+	if err := (Request{ScheduledAt: &future}).ValidateScheduledAt(now); err != nil {
+		t.Fatalf("future: %v", err)
+	}
+	skewOK := now.Add(-2 * time.Second)
+	if err := (Request{ScheduledAt: &skewOK}).ValidateScheduledAt(now); err != nil {
+		t.Fatalf("within skew: %v", err)
+	}
+	past := now.Add(-time.Minute)
+	if err := (Request{ScheduledAt: &past}).ValidateScheduledAt(now); err == nil {
+		t.Fatal("past scheduled_at accepted")
+	}
+}
+
 func TestValidateIdempotencyKey(t *testing.T) {
 	for _, key := range []string{"a", "order-123", "2f1c:retry/1", strings.Repeat("k", 255)} {
 		if err := ValidateIdempotencyKey(key); err != nil {
