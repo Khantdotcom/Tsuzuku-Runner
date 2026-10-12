@@ -1,54 +1,103 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
-import { decodeLogData, type LogChunk } from "@/lib/api";
-import { openSSE, streamURL } from "@/lib/sse";
+import {
+  decodeLogData,
+  getJob,
+  isTerminalState,
+  listLogs,
+  type LogChunk,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type Line = { id: number; stream: string; text: string };
+type Status = "connecting" | "live" | "done" | "error";
+
+const pollMs = 1_000;
+
+function mergeChunks(
+  prev: Line[],
+  seen: Set<number>,
+  chunks: LogChunk[],
+): Line[] {
+  if (chunks.length === 0) return prev;
+  const next = [...prev];
+  for (const chunk of chunks) {
+    if (seen.has(chunk.id)) continue;
+    seen.add(chunk.id);
+    next.push({
+      id: chunk.id,
+      stream: chunk.stream,
+      text: decodeLogData(chunk.data),
+    });
+  }
+  return next;
+}
 
 export function LiveLogs({
   jobId,
 }: {
   jobId: string;
-  /** Kept for callers; the stream always drains until done. */
+  /** Kept for callers; polling drains until the job is terminal and quiet. */
   active?: boolean;
 }) {
   const [lines, setLines] = useState<Line[]>([]);
   const [paused, setPaused] = useState(false);
-  const [status, setStatus] = useState<"connecting" | "live" | "done" | "error">(
-    "connecting",
-  );
+  const [status, setStatus] = useState<Status>("connecting");
   const bottomRef = useRef<HTMLDivElement>(null);
   const afterRef = useRef(0);
+  const seenRef = useRef(new Set<number>());
+
+  const job = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => getJob(jobId),
+    refetchInterval: (q) =>
+      q.state.data && isTerminalState(q.state.data.state) ? false : pollMs,
+  });
+
+  const terminal = !!job.data && isTerminalState(job.data.state);
 
   useEffect(() => {
-    const close = openSSE(streamURL("logs", jobId, afterRef.current || undefined), {
-      onOpen: () => setStatus("live"),
-      onError: () => setStatus((s) => (s === "done" ? s : "error")),
-      onEvent: (name, data, id) => {
-        if (name === "done") {
-          setStatus("done");
-          return;
-        }
-        if (name !== "chunk") return;
-        try {
-          const chunk = JSON.parse(data) as LogChunk;
-          const text = decodeLogData(chunk.data);
-          afterRef.current = chunk.id;
-          if (id) {
-            const n = Number(id);
-            if (!Number.isNaN(n)) afterRef.current = n;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let emptyWhileTerminal = 0;
+
+    const schedule = () => {
+      timer = setTimeout(() => {
+        void tick();
+      }, pollMs);
+    };
+
+    const tick = async () => {
+      try {
+        const page = await listLogs(jobId, afterRef.current, 200);
+        if (cancelled) return;
+        setStatus("live");
+        if (page.chunks.length > 0) {
+          emptyWhileTerminal = 0;
+          afterRef.current = page.next_after;
+          setLines((prev) => mergeChunks(prev, seenRef.current, page.chunks));
+        } else if (terminal) {
+          emptyWhileTerminal += 1;
+          if (emptyWhileTerminal >= 2) {
+            setStatus("done");
+            return;
           }
-          setLines((prev) => [...prev, { id: chunk.id, stream: chunk.stream, text }]);
-        } catch {
-          setStatus("error");
         }
-      },
-    });
-    return close;
-  }, [jobId]);
+      } catch {
+        if (!cancelled) setStatus((s) => (s === "done" ? s : "error"));
+      }
+      if (!cancelled) schedule();
+    };
+
+    void tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [jobId, terminal]);
 
   useEffect(() => {
     if (!paused) {
@@ -61,9 +110,9 @@ export function LiveLogs({
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
           {status === "connecting" && "Connecting…"}
-          {status === "live" && "Live"}
-          {status === "done" && "Stream finished"}
-          {status === "error" && "Stream interrupted"}
+          {status === "live" && "Live (polling)"}
+          {status === "done" && "Finished"}
+          {status === "error" && "Poll interrupted"}
         </p>
         <button
           type="button"

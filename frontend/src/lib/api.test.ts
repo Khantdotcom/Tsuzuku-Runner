@@ -16,8 +16,12 @@ describe("decodeLogData", () => {
 describe("job state helpers", () => {
   it("recognises terminal and cancellable states", () => {
     expect(isTerminalState("COMPLETED")).toBe(true);
+    expect(isTerminalState("BLOCKED")).toBe(true);
     expect(isTerminalState("EXECUTING")).toBe(false);
+    expect(isTerminalState("RETRYING")).toBe(false);
     expect(isCancellableState("QUEUED")).toBe(true);
+    expect(isCancellableState("RETRYING")).toBe(true);
     expect(isCancellableState("FAILED")).toBe(false);
+    expect(isCancellableState("BLOCKED")).toBe(false);
   });
 });

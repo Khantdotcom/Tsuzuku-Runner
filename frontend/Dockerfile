@@ -14,6 +14,7 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm-store \
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+ENV DOCKER_BUILD=1
 RUN pnpm build
 
 FROM node:24-alpine AS runtime

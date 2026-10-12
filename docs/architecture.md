@@ -379,6 +379,18 @@ Every push to `main` and every pull request runs `.github/workflows/ci.yml`:
 
 Third-party actions are pinned to commit SHAs. `task ci` runs the same checks locally, except the smoke test.
 
+## v1.0 demo (kill a worker)
+
+Compose runs two workers (`worker-01`, `worker-02`). The flagship recovery path:
+
+1. Submit a long-running job (for example `sleep 300`) so it reaches `EXECUTING` on one worker.
+2. Stop that worker (`docker compose stop worker-01`, or `task demo:recovery` which does this automatically).
+3. Within about one `TSUZUKU_LEASE_TTL` (default 30s) plus a scheduler tick, the lease expires, the attempt is finished as `FAILED` / `INFRASTRUCTURE`, and the job returns to `QUEUED`.
+4. The other worker claims it as a new attempt; the job detail timeline and attempts list show the handoff.
+5. Cancel or let verification finish.
+
+`task demo:recovery` builds an isolated Compose project, kills the assigned worker mid-job, and asserts a second attempt or reassignment. Live logs and job updates in the dashboard use short-request polling so the UI works on Vercel Hobby when the API is reachable at `TSUZUKU_API_URL`.
+
 ## Status
 
-Milestones 0–9 for the MVP demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, and an AI executor seam (`executor.kind` + CLI template) that still goes through independent verification. Milestone 10 (v0.9) adds idempotent outbound delivery: a `PATCH` row when `diff.patch` exists, and an optional `GITHUB_PR` (`delivery.github_pr` + `TSUZUKU_GITHUB_TOKEN`) that commits the patch file and opens or reuses a pull request.
+Milestones 0–10 and the v1.0 demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, an AI executor seam, idempotent `PATCH` / `GITHUB_PR` delivery, and multi-worker lease recovery (`task demo:recovery`). The Next.js dashboard deploys to Vercel with the Go API hosted separately.

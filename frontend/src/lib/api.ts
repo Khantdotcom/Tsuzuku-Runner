@@ -280,6 +280,18 @@ export async function listAttempts(id: string): Promise<Attempt[]> {
   return body.attempts;
 }
 
+export async function listLogs(
+  id: string,
+  after = 0,
+  limit = 200,
+): Promise<{ chunks: LogChunk[]; next_after: number }> {
+  const q = new URLSearchParams();
+  if (after > 0) q.set("after", String(after));
+  if (limit > 0) q.set("limit", String(limit));
+  const suffix = q.size ? `?${q}` : "";
+  return getJSON(`/v1/jobs/${encodeURIComponent(id)}/logs${suffix}`);
+}
+
 export async function getEvidence(id: string): Promise<Evidence> {
   return getJSON<Evidence>(`/v1/jobs/${encodeURIComponent(id)}/evidence`);
 }
@@ -350,7 +362,12 @@ export function decodeLogData(data: string): string {
 }
 
 export function isTerminalState(state: JobState): boolean {
-  return state === "COMPLETED" || state === "FAILED" || state === "CANCELLED";
+  return (
+    state === "COMPLETED" ||
+    state === "FAILED" ||
+    state === "CANCELLED" ||
+    state === "BLOCKED"
+  );
 }
 
 export function isCancellableState(state: JobState): boolean {
@@ -359,6 +376,7 @@ export function isCancellableState(state: JobState): boolean {
     state === "SCHEDULED" ||
     state === "PREPARING" ||
     state === "EXECUTING" ||
-    state === "VERIFYING"
+    state === "VERIFYING" ||
+    state === "RETRYING"
   );
 }

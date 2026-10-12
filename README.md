@@ -68,7 +68,11 @@ The workers start job containers through the host's Docker socket, so Compose ru
 
 Sending the same request again with the same `Idempotency-Key` returns the same job instead of creating another. See [Workload submission](docs/architecture.md#workload-submission) for every field and its default.
 
-Stop a worker with `docker compose stop worker-02` and the dashboard shows it `offline` within about 15 seconds; `docker compose start worker-02` brings it back with the same ID. `docker compose down` stops the stack and keeps the database; add `-v` to wipe it.
+Stop a worker with `docker compose stop worker-02` and the dashboard shows it `offline` within about 15 seconds; `docker compose start worker-02` brings it back with the same ID. To prove mid-job recovery, run `task demo:recovery` (isolated stack) or stop the worker that holds a running job and watch the other worker pick up a new attempt after the lease expires. `docker compose down` stops the stack and keeps the database; add `-v` to wipe it.
+
+### Dashboard on Vercel
+
+The Next.js UI in `frontend/` can deploy to **Vercel Hobby**. Set the project root to `frontend` and `TSUZUKU_API_URL` to a publicly reachable Go API. Workers and Postgres stay off Vercel (use Compose or another host). See [frontend/README.md](frontend/README.md).
 
 ### Prerequisites for host development
 
@@ -114,6 +118,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task lint:docker` / `fe:docker` | Run golangci-lint, or the dashboard lint, typecheck, and build, in a container |
 | `task ci:docker`        | Run the full CI checks with only Docker on the host |
 | `task smoke`            | Build and start an isolated stack, check workers and readiness, run passing, failing, unverified, and cancelled jobs and check their evidence, then remove it |
+| `task demo:recovery`    | v1.0 kill-worker demo: isolated stack, stop the assigned worker mid-job, assert recovery, then tear down |
 
 The `:docker` variants need only Docker and Task. Use them where host toolchains can't run, for example on Windows when Smart App Control blocks freshly built test binaries, `gcc` is missing for `-race`, or `pnpm` is blocked.
 

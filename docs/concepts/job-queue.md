@@ -112,6 +112,7 @@ SELECT pg_try_advisory_xact_lock(32778045701319541);
 - Each worker heartbeat runs `RenewWorkerLeases` for that worker's still-valid leases.
 - Ending an attempt releases its lease (`ReleaseLeaseByAttempt`).
 - Under the same advisory lock as placement, the scheduler requeues `SCHEDULED` jobs whose worker is offline, for expired mid-run leases finishes the attempt as `FAILED` / `INFRASTRUCTURE` then moves the job `PREPARING|EXECUTING|VERIFYING` → `QUEUED` (clearing the worker and any pending cancel), and promotes due `RETRYING` jobs to `QUEUED`. A partial unique index still allows at most one active lease per job.
+- `task demo:recovery` deliberately stops the worker that holds a running job and checks that a second attempt (or reassignment) appears—the v1.0 kill-worker demo.
 
 ## Retries with backoff
 

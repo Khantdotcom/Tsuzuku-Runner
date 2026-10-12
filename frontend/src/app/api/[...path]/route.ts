@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 
 const upstreamTimeoutMs = 5_000;
+const downloadTimeoutMs = 8_000;
+// Kept for local Compose; the Hobby UI polls JSON APIs instead of SSE.
 const streamTimeoutMs = 15 * 60_000;
 
 function apiBaseURL(): string {
@@ -36,6 +38,20 @@ function isStreamPath(segments: string[]): boolean {
   );
 }
 
+function isDownloadPath(segments: string[]): boolean {
+  if (segments[0] !== "v1" || segments[1] !== "jobs") {
+    return false;
+  }
+  // /v1/jobs/{id}/artifacts/{artifactID} or .../evidence/bundle
+  if (segments.length === 5 && segments[3] === "artifacts") {
+    return true;
+  }
+  if (segments.length === 5 && segments[3] === "evidence" && segments[4] === "bundle") {
+    return true;
+  }
+  return false;
+}
+
 function problem(status: number, title: string, detail: string): Response {
   return Response.json(
     { type: "about:blank", title, status, detail },
@@ -47,6 +63,16 @@ function problem(status: number, title: string, detail: string): Response {
       },
     },
   );
+}
+
+function timeoutFor(segments: string[]): number {
+  if (isStreamPath(segments)) {
+    return streamTimeoutMs;
+  }
+  if (isDownloadPath(segments)) {
+    return downloadTimeoutMs;
+  }
+  return upstreamTimeoutMs;
 }
 
 async function proxy(
@@ -93,7 +119,7 @@ async function proxy(
         request.method === "GET" || request.method === "HEAD"
           ? undefined
           : await request.arrayBuffer(),
-      signal: AbortSignal.timeout(stream ? streamTimeoutMs : upstreamTimeoutMs),
+      signal: AbortSignal.timeout(timeoutFor(path)),
     });
   } catch {
     return problem(502, "Bad Gateway", "the Tsuzuku API is unreachable");

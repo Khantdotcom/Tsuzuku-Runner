@@ -18,7 +18,6 @@ import {
   retryDeliveries,
 } from "@/lib/api";
 import { durationBetween, formatAgo, formatBytes, shortRepo } from "@/lib/format";
-import { openSSE, streamURL } from "@/lib/sse";
 import { cn } from "@/lib/utils";
 
 type Tab =
@@ -62,30 +61,19 @@ export function JobDetailView({ id }: { id: string }) {
       q.state.data && isTerminalState(q.state.data.state) ? false : 2_000,
   });
 
-  const jobID = job.data?.id;
-  const jobState = job.data?.state;
-  useEffect(() => {
-    if (!jobID || !jobState || isTerminalState(jobState)) return;
-    return openSSE(streamURL("events", jobID), {
-      onEvent: (name) => {
-        if (name === "event" || name === "done") {
-          void qc.invalidateQueries({ queryKey: ["job", id] });
-          void qc.invalidateQueries({ queryKey: ["evidence", id] });
-          void qc.invalidateQueries({ queryKey: ["attempts", id] });
-        }
-      },
-    });
-  }, [jobID, jobState, id, qc]);
-
   const attempts = useQuery({
     queryKey: ["attempts", id],
     queryFn: () => listAttempts(id),
     enabled: !!job.data,
+    refetchInterval: () =>
+      job.data && isTerminalState(job.data.state) ? false : 2_000,
   });
   const evidence = useQuery({
     queryKey: ["evidence", id],
     queryFn: () => getEvidence(id),
     enabled: !!job.data,
+    refetchInterval: () =>
+      job.data && isTerminalState(job.data.state) ? false : 2_000,
   });
   const deliveries = useQuery({
     queryKey: ["deliveries", id],
@@ -97,6 +85,8 @@ export function JobDetailView({ id }: { id: string }) {
     mutationFn: () => cancelJob(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["job", id] });
+      void qc.invalidateQueries({ queryKey: ["attempts", id] });
+      void qc.invalidateQueries({ queryKey: ["evidence", id] });
     },
   });
   const retryDelivery = useMutation({

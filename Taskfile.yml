@@ -12,6 +12,8 @@ vars:
   GOLANGCI_LINT_IMAGE: golangci/golangci-lint:v2.14.0
   SMOKE_IMAGE: alpine:3
   SMOKE_PROJECT: tsuzuku-smoke
+  RECOVERY_PROJECT: tsuzuku-recovery
+  RECOVERY_IMAGE: docker:27-cli
   # Shared by the *:docker tasks. Named volumes keep caches between runs and keep
   # Linux node_modules out of the host checkout.
   DOCKER_GO: >-
@@ -228,6 +230,25 @@ tasks:
         docker run --rm --network {{.SMOKE_PROJECT}}_default
         -v "{{.ROOT_DIR}}/scripts:/scripts:ro"
         {{.SMOKE_IMAGE}} sh /scripts/smoke-probe.sh
+
+  demo:recovery:
+    desc: v1.0 kill-worker recovery demo on an isolated Compose project (stops the assigned worker mid-job and asserts reassignment / a second attempt)
+    env:
+      TSUZUKU_PG_HOST_PORT: "16433"
+      TSUZUKU_API_HOST_PORT: "19080"
+      TSUZUKU_UI_HOST_PORT: "14000"
+    cmds:
+      - defer: docker compose -p {{.RECOVERY_PROJECT}} down --volumes --remove-orphans
+      - defer: '{{if .EXIT_CODE}}docker compose -p {{.RECOVERY_PROJECT}} logs --no-color{{else}}true{{end}}'
+      - docker compose -p {{.RECOVERY_PROJECT}} up --build --detach
+      - >-
+        docker run --rm --network {{.RECOVERY_PROJECT}}_default
+        -v /var/run/docker.sock:/var/run/docker.sock
+        -v "{{.ROOT_DIR}}/scripts:/scripts:ro"
+        -e API_URL=http://server:8080
+        -e COMPOSE_PROJECT={{.RECOVERY_PROJECT}}
+        {{.RECOVERY_IMAGE}}
+        sh -c "apk add --no-cache wget >/dev/null && sh /scripts/recovery-probe.sh"
 
   lint:
     desc: Run golangci-lint
