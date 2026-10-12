@@ -40,8 +40,8 @@ docker compose up --build
 
 This starts PostgreSQL, applies migrations, then runs the API server, two workers (`worker-01`, `worker-02`), and the dashboard:
 
-- Dashboard: <http://localhost:3000>
-- API: <http://localhost:8080> (`/healthz`, `/readyz`, `/api/v1/workers`, `/api/v1/jobs`)
+- Dashboard: <http://localhost:3000> (submit jobs, watch live logs, inspect evidence)
+- API: <http://localhost:8080> (`/healthz`, `/readyz`, `/openapi.yaml`, `/api/v1/stats`, `/api/v1/jobs`)
 
 Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container, then runs the verification command in the same workspace. The job ends `COMPLETED` only when both exit `0`, and `FAILED` otherwise:
 
@@ -108,7 +108,7 @@ The server needs the database to start. Stop the worker and it shows as `offline
 | `task migrate:up` / `migrate:down` / `migrate:status` | Manage schema migrations |
 | `task migrate:create -- NAME` | Add a new SQL migration                       |
 | `task sqlc`             | Regenerate query code after changing SQL            |
-| `task fe:dev` / `fe:lint` / `fe:typecheck` / `fe:build` | Dashboard development and checks |
+| `task fe:dev` / `fe:lint` / `fe:typecheck` / `fe:test` / `fe:build` | Dashboard development and checks |
 | `task ci`               | Run the CI checks locally (Go, sqlc drift, dashboard) |
 | `task test:docker`      | Run unit and integration tests with `-race` in a Go container |
 | `task lint:docker` / `fe:docker` | Run golangci-lint, or the dashboard lint, typecheck, and build, in a container |
@@ -128,7 +128,7 @@ All configuration comes from environment variables prefixed with `TSUZUKU_`. See
 - [Architecture](docs/architecture.md)
 - [Database design](docs/database-design.md)
 - [Backend concepts](docs/concepts/): plain-English notes on the ideas behind the design
-- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency, how [workloads run in locked-down containers](docs/adr/0005-docker-runtime.md), and where [logs and artifacts are stored](docs/adr/0006-evidence-storage.md)
+- [Architecture Decision Records](docs/adr/), including why [PostgreSQL is the job queue](docs/adr/0003-postgres-as-job-queue.md) how [the job state machine](docs/adr/0004-job-state-machine.md) stays consistent under concurrency, how [workloads run in locked-down containers](docs/adr/0005-docker-runtime.md), where [logs and artifacts are stored](docs/adr/0006-evidence-storage.md), and the [public OpenAPI](docs/openapi.yaml)
 
 ## License
 

@@ -12,5 +12,6 @@ These notes explain *why things work the way they do*. For *what the system does
 | [Long polling](long-polling.md) | Long polling and its alternatives, wake-up signals, the lost wake-up bug, shutting down with open requests, client timeouts |
 | [Running untrusted code](containers.md) | Containers versus VMs, least privilege, resource limits, injection, clean environments, cleanup labels, cancelled requests that still happen, fenced reports |
 | [Logs, evidence, and cancellation](evidence.md) | Batching, exactly-once from at-least-once, bounded buffers, atomic writes, path traversal, checksums, work after commit, independent verification, failure categories, cooperative cancellation, deciding races with a rule |
+| [Live updates and scheduled work](streaming.md) | Server-sent events, reconnect cursors, scheduled placement, dashboard stats |
 
 Read them in the order above; later notes build on earlier ones.

@@ -107,6 +107,7 @@ State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = 
 | `GetWorkloadByIdempotencyKey` | Replaying a submission that reuses an `Idempotency-Key`                    |
 | `GetJobByNumber`              | Looking a job up by its `#number`                                          |
 | `ListJobs`                    | Newest-first listing with an optional state filter; `before` is a job number cursor |
+| `CountJobsByState`            | Per-state counts rolled into dashboard buckets by `job.Service.Stats`              |
 | `ListJobEvents`               | Timeline after an event ID; the last ID returned is the next cursor        |
 | `ListLogChunks`               | Log output after a chunk ID, with a row limit                              |
 | `ListAttempts`                | A job's attempts in order                                                  |

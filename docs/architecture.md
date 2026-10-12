@@ -70,7 +70,11 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `GET /api/v1/jobs/{id}`               | none         | Job with its workload and state history                    |
 | `GET /api/v1/jobs/{id}/attempts`      | none         | Attempts in order                                          |
 | `GET /api/v1/jobs/{id}/events`        | none         | Timeline events after an `after` cursor                    |
+| `GET /api/v1/stats`                   | none         | Dashboard counts: queued, scheduled, running, completed, failed, cancelled |
 | `GET /api/v1/jobs/{id}/logs`          | none         | Log chunks after an `after` cursor (data is base64)        |
+| `GET /api/v1/jobs/{id}/events/stream` | none         | SSE timeline; reconnect with `after` or `Last-Event-ID`    |
+| `GET /api/v1/jobs/{id}/logs/stream`   | none         | SSE log chunks; reconnect with `after` or `Last-Event-ID`  |
+| `GET /openapi.yaml`                   | none         | Public OpenAPI document (UI and job APIs; not worker routes) |
 | `POST /api/v1/jobs/{id}/cancel`       | none         | Cancel a job: `200` if it had not started, `202` if running, `409` if finished |
 | `GET /api/v1/jobs/{id}/evidence`      | none         | Artifacts, verification runs with their checks, and failures |
 | `GET /api/v1/jobs/{id}/artifacts`     | none         | Stored files with size, SHA-256, and a download URL        |
@@ -96,6 +100,7 @@ Workers authenticate with a shared bearer token (`TSUZUKU_WORKER_TOKEN`), compar
 | `runtime.image`             | no       | `golang:1.27`  | Official `golang`, `node`, or `python` image; no tag means `latest` |
 | `runtime.network`           | no       | `true`         |                                                                |
 | `verification.command`      | no       |                | Run after `command` when given                                 |
+| `scheduled_at`              | no       | now            | RFC 3339 time; must not be more than a few seconds in the past |
 
 Defaults above a configured maximum are lowered to it. Unknown fields and wrong types are rejected with `400`; values that break a rule return `422` with the field named in `detail`. The normalized spec, with every default filled in, is stored as `workloads.spec`.
 
@@ -285,13 +290,15 @@ sequenceDiagram
 
 ## Dashboard
 
-The dashboard (`frontend/`, Next.js) shows API liveness, database readiness, and the worker fleet, polling every 5 seconds.
+The dashboard (`frontend/`, Next.js) is the Milestone 2 UI: a home page with job counts and recent jobs, a submit form (including schedule), a job detail view with live logs over SSE, verification and artifacts, and a workers page.
 
-The browser only talks to the dashboard's own origin. A route handler at `/api/[...path]` forwards an allowlisted set of `GET` paths (`/api/healthz`, `/api/readyz`, `/api/v1/*`) to the API at `TSUZUKU_API_URL`, read at request time. As a result:
+The browser only talks to the dashboard's own origin. A route handler at `/api/[...path]` forwards an allowlisted set of `GET` and `POST` paths (`/api/healthz`, `/api/readyz`, `/api/openapi.yaml`, `/api/v1/*`) to the API at `TSUZUKU_API_URL`, read at request time. SSE streams use a longer proxy timeout so they are not cut after a few seconds. As a result:
 
 - the Go API needs no CORS configuration;
 - one dashboard image works in any environment, because the API address is not baked in at build time;
 - an unreachable API turns into a `502` problem response instead of a browser network error.
+
+The public HTTP surface is also described in [`docs/openapi.yaml`](openapi.yaml) and served at `GET /openapi.yaml`.
 
 ## Local deployment
 
@@ -340,4 +347,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestone 0 (foundation) is complete: worker registration and heartbeats, the dashboard, the Compose stack, and CI. Milestone 1 (the execution core) is complete: workload submission, the job state machine, scheduling and claiming, running jobs in isolated Docker containers, log streaming and artifacts, verification, failure classification, and cancellation. The dashboard pages for jobs and evidence come next.
+Milestone 0 (foundation) and Milestone 1 (execution core) are complete. Milestone 2 (frontend MVP) is complete: dashboard stats, submit and schedule, job detail with live SSE logs and evidence, workers page, public OpenAPI, and frontend unit tests in CI.

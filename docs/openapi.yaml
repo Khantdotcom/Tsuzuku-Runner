@@ -1,0 +1,294 @@
+openapi: 3.1.0
+info:
+  title: Tsuzuku Runner API
+  version: 0.3.0
+  description: |
+    Public HTTP API for submitting workloads, inspecting jobs, and watching
+    live progress. Worker coordination endpoints are intentionally omitted.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      operationId: healthz
+      responses:
+        "200":
+          description: Process is up
+  /readyz:
+    get:
+      summary: Readiness
+      operationId: readyz
+      responses:
+        "200":
+          description: Database is reachable
+        "503":
+          description: Database is unreachable
+  /openapi.yaml:
+    get:
+      summary: OpenAPI document
+      operationId: openapi
+      responses:
+        "200":
+          description: YAML OpenAPI document
+  /api/v1/stats:
+    get:
+      summary: Job counts for the dashboard
+      operationId: getStats
+      responses:
+        "200":
+          description: Counts by dashboard bucket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Stats"
+  /api/v1/workers:
+    get:
+      summary: List registered workers
+      operationId: listWorkers
+      responses:
+        "200":
+          description: Worker fleet
+  /api/v1/workloads:
+    post:
+      summary: Submit a workload
+      operationId: submitWorkload
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkloadRequest"
+      responses:
+        "201":
+          description: Job created
+        "200":
+          description: Idempotent replay of an earlier submission
+        "409":
+          description: Idempotency key reused with a different workload
+        "422":
+          description: Invalid workload fields
+  /api/v1/jobs:
+    get:
+      summary: List jobs newest first
+      operationId: listJobs
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: before
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 200
+      responses:
+        "200":
+          description: Job page
+  /api/v1/jobs/{id}:
+    get:
+      summary: Job detail
+      operationId: getJob
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Job with workload and transitions
+        "404":
+          description: Unknown job
+  /api/v1/jobs/{id}/cancel:
+    post:
+      summary: Cancel a job
+      operationId: cancelJob
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Cancelled immediately (not yet started)
+        "202":
+          description: Cancellation requested for a running job
+        "409":
+          description: Job already finished
+  /api/v1/jobs/{id}/attempts:
+    get:
+      summary: List attempts
+      operationId: listAttempts
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Attempts in order
+  /api/v1/jobs/{id}/events:
+    get:
+      summary: List timeline events
+      operationId: listEvents
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - $ref: "#/components/parameters/After"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Event page
+  /api/v1/jobs/{id}/events/stream:
+    get:
+      summary: Stream timeline events (SSE)
+      operationId: streamEvents
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - $ref: "#/components/parameters/After"
+      responses:
+        "200":
+          description: text/event-stream of event and done messages
+  /api/v1/jobs/{id}/logs:
+    get:
+      summary: List log chunks
+      operationId: listLogs
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - $ref: "#/components/parameters/After"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            maximum: 1000
+      responses:
+        "200":
+          description: Log chunk page (data is base64)
+  /api/v1/jobs/{id}/logs/stream:
+    get:
+      summary: Stream log chunks (SSE)
+      operationId: streamLogs
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - $ref: "#/components/parameters/After"
+      responses:
+        "200":
+          description: text/event-stream of chunk and done messages
+  /api/v1/jobs/{id}/evidence:
+    get:
+      summary: Artifacts, verification, and failures
+      operationId: getEvidence
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Evidence bundle summary
+  /api/v1/jobs/{id}/artifacts:
+    get:
+      summary: List artifacts
+      operationId: listArtifacts
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Artifact metadata and download URLs
+  /api/v1/jobs/{id}/artifacts/{artifactID}:
+    get:
+      summary: Download an artifact
+      operationId: downloadArtifact
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+        - name: artifactID
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: File bytes
+        "404":
+          description: Unknown artifact
+components:
+  parameters:
+    JobID:
+      name: id
+      in: path
+      required: true
+      description: Job UUID or job number
+      schema:
+        type: string
+    After:
+      name: after
+      in: query
+      schema:
+        type: integer
+        format: int64
+        minimum: 0
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        maximum: 200
+  schemas:
+    Stats:
+      type: object
+      required: [queued, scheduled, running, completed, failed, cancelled]
+      properties:
+        queued:
+          type: integer
+        scheduled:
+          type: integer
+        running:
+          type: integer
+          description: PREPARING + EXECUTING + VERIFYING
+        completed:
+          type: integer
+        failed:
+          type: integer
+        cancelled:
+          type: integer
+    WorkloadRequest:
+      type: object
+      required: [repository, revision, command]
+      properties:
+        repository:
+          type: string
+          format: uri
+        revision:
+          type: string
+        command:
+          type: string
+        acceptance_criteria:
+          type: array
+          items:
+            type: string
+        resources:
+          type: object
+          properties:
+            cpu:
+              type: number
+            memory_mb:
+              type: integer
+        timeout_seconds:
+          type: integer
+        runtime:
+          type: object
+          properties:
+            image:
+              type: string
+            network:
+              type: boolean
+        verification:
+          type: object
+          properties:
+            command:
+              type: string
+        scheduled_at:
+          type: string
+          format: date-time
+          description: When the job becomes placeable; omit to run as soon as a worker is free
