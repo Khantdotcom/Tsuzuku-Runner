@@ -577,16 +577,25 @@ const transitionJob = `-- name: TransitionJob :one
 UPDATE jobs
 SET state              = $1,
     updated_at         = now(),
-    assigned_worker_id = coalesce($2::uuid, assigned_worker_id),
-    started_at         = CASE WHEN $3::boolean THEN coalesce(started_at, now()) ELSE started_at END,
-    finished_at        = CASE WHEN $4::boolean THEN now() ELSE finished_at END
-WHERE id = $5 AND state = $6
+    assigned_worker_id = CASE
+        WHEN $2::boolean THEN NULL
+        ELSE coalesce($3::uuid, assigned_worker_id)
+    END,
+    cancel_requested_at = CASE
+        WHEN $4::boolean THEN NULL
+        ELSE cancel_requested_at
+    END,
+    started_at         = CASE WHEN $5::boolean THEN coalesce(started_at, now()) ELSE started_at END,
+    finished_at        = CASE WHEN $6::boolean THEN now() ELSE finished_at END
+WHERE id = $7 AND state = $8
 RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
 `
 
 type TransitionJobParams struct {
 	ToState        string
+	ClearWorker    bool
 	AssignWorkerID *uuid.UUID
+	ClearCancel    bool
 	MarkStarted    bool
 	MarkFinished   bool
 	ID             uuid.UUID
@@ -596,11 +605,15 @@ type TransitionJobParams struct {
 // TransitionJob is a compare-and-set: it returns no row when the job is no
 // longer in from_state, so concurrent transitions cannot both succeed.
 // started_at keeps the first start; finished_at is set on every final state.
-// A non-NULL assign_worker_id sets the assigned worker in the same update.
+// clear_worker drops the assignment (recovery requeue); otherwise a non-NULL
+// assign_worker_id sets the assigned worker. clear_cancel drops a pending
+// cancel when the job is put back on the queue.
 func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (Job, error) {
 	row := q.db.QueryRow(ctx, transitionJob,
 		arg.ToState,
+		arg.ClearWorker,
 		arg.AssignWorkerID,
+		arg.ClearCancel,
 		arg.MarkStarted,
 		arg.MarkFinished,
 		arg.ID,

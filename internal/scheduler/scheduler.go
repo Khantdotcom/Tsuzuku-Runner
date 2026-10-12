@@ -70,7 +70,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 // Tick runs one scheduling round in a single transaction and returns what it
-// placed. It places nothing when another scheduler holds the lock.
+// placed. It places nothing when another scheduler holds the lock. Before
+// placement it recovers abandoned SCHEDULED jobs and expired mid-run leases.
 func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 	var placed []Assignment
 	err := store.WithTx(ctx, s.pool, func(q *db.Queries) error {
@@ -80,6 +81,10 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 		}
 		if !locked {
 			return nil
+		}
+
+		if err := s.recover(ctx, q); err != nil {
+			return err
 		}
 
 		rows, err := q.ListSchedulableWorkers(ctx, s.opts.StaleAfter.Seconds())
@@ -136,4 +141,38 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 		s.logger.InfoContext(ctx, "job scheduled", "job_id", a.JobID, "worker", a.Worker.Name, "worker_id", a.Worker.ID)
 	}
 	return placed, nil
+}
+
+// recover returns abandoned SCHEDULED jobs to QUEUED and fails mid-run
+// attempts whose leases expired, then requeues those jobs. Callers must hold
+// the scheduler advisory lock.
+func (s *Scheduler) recover(ctx context.Context, q *db.Queries) error {
+	limit := int32(s.opts.BatchSize) //nolint:gosec // BatchSize is a small positive cap
+
+	abandoned, err := q.ListAbandonedScheduledJobs(ctx, db.ListAbandonedScheduledJobsParams{
+		StaleSeconds: s.opts.StaleAfter.Seconds(),
+		RowLimit:     limit,
+	})
+	if err != nil {
+		return fmt.Errorf("list abandoned scheduled jobs: %w", err)
+	}
+	for _, j := range abandoned {
+		if err := job.RequeueAbandonedScheduled(ctx, q, j.ID); err != nil {
+			return fmt.Errorf("requeue abandoned scheduled job %s: %w", j.ID, err)
+		}
+		s.logger.InfoContext(ctx, "requeued abandoned scheduled job", "job_id", j.ID, "job_number", j.Number)
+	}
+
+	expired, err := q.ListExpiredLeases(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("list expired leases: %w", err)
+	}
+	for _, row := range expired {
+		if err := job.FailExpiredLease(ctx, q, row.JobID, row.AttemptID, job.State(row.JobState)); err != nil {
+			return fmt.Errorf("recover expired lease on job %s: %w", row.JobID, err)
+		}
+		s.logger.InfoContext(ctx, "requeued job after expired lease",
+			"job_id", row.JobID, "attempt_id", row.AttemptID, "worker_id", row.WorkerID)
+	}
+	return nil
 }

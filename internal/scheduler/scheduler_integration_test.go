@@ -220,6 +220,93 @@ func TestTickBroadcastsOnlyWhenPlacing(t *testing.T) {
 	}
 }
 
+func TestTickRequeuesAbandonedScheduledJobs(t *testing.T) {
+	pool := storetest.NewPool(t)
+	first := addWorker(t, pool, "gone", 2)
+	second := addWorker(t, pool, "alive", 2)
+	jobs := submit(t, pool, 1)
+	s := newScheduler(pool, nil)
+
+	if placed, err := s.Tick(t.Context()); err != nil || len(placed) != 1 {
+		t.Fatalf("first Tick placed %d (err %v), want 1", len(placed), err)
+	}
+	j := getJob(t, pool, jobs[0])
+	if j.State != string(job.Scheduled) || j.AssignedWorkerID == nil || *j.AssignedWorkerID != first {
+		t.Fatalf("job = state %s worker %v, want SCHEDULED on the earlier worker", j.State, j.AssignedWorkerID)
+	}
+
+	exec(t, pool, "UPDATE workers SET last_heartbeat_at = now() - interval '1 hour' WHERE id = $1", first)
+	if placed, err := s.Tick(t.Context()); err != nil {
+		t.Fatalf("recovery Tick: %v", err)
+	} else if len(placed) != 1 || placed[0].JobID != jobs[0] || placed[0].Worker.ID != second {
+		t.Fatalf("recovery Tick placed %+v, want the job on the online worker", placed)
+	}
+	j = getJob(t, pool, jobs[0])
+	if j.State != string(job.Scheduled) || j.AssignedWorkerID == nil || *j.AssignedWorkerID != second {
+		t.Errorf("job = state %s worker %v, want SCHEDULED on the online worker", j.State, j.AssignedWorkerID)
+	}
+}
+
+func TestTickRecoversExpiredLeases(t *testing.T) {
+	pool := storetest.NewPool(t)
+	w := addWorker(t, pool, "lease-holder", 1)
+	jobs := submit(t, pool, 1)
+	s := newScheduler(pool, nil)
+	svc := job.NewService(pool)
+
+	if placed, err := s.Tick(t.Context()); err != nil || len(placed) != 1 {
+		t.Fatalf("place: %v placed %d", err, len(placed))
+	}
+	claimed, found, err := svc.Claim(t.Context(), w)
+	if err != nil || !found {
+		t.Fatalf("Claim: found %v, err %v", found, err)
+	}
+
+	// expires_at must stay after acquired_at (leases_check); shift both back.
+	exec(t, pool, `UPDATE leases SET acquired_at = now() - interval '2 minutes',
+		expires_at = now() - interval '1 second' WHERE attempt_id = $1`, claimed.Attempt.ID)
+	exec(t, pool, "UPDATE workers SET last_heartbeat_at = now() - interval '1 hour' WHERE id = $1", w)
+	alive := addWorker(t, pool, "replacement", 1)
+
+	if placed, err := s.Tick(t.Context()); err != nil {
+		t.Fatalf("recovery Tick: %v", err)
+	} else if len(placed) != 1 || placed[0].JobID != jobs[0] || placed[0].Worker.ID != alive {
+		t.Fatalf("recovery Tick placed %+v, want requeue then place on replacement", placed)
+	}
+
+	j := getJob(t, pool, jobs[0])
+	if j.State != string(job.Scheduled) || j.AssignedWorkerID == nil || *j.AssignedWorkerID != alive {
+		t.Errorf("job = state %s worker %v, want SCHEDULED on replacement", j.State, j.AssignedWorkerID)
+	}
+	attempt, err := db.New(pool).LockAttempt(t.Context(), claimed.Attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt.Status != job.AttemptFailed || attempt.Error == nil || !strings.Contains(*attempt.Error, "lease expired") {
+		t.Errorf("attempt = status %s error %v, want FAILED lease expired", attempt.Status, attempt.Error)
+	}
+	failures, err := db.New(pool).ListFailures(t.Context(), jobs[0])
+	if err != nil || len(failures) != 1 || failures[0].Category != job.CategoryInfrastructure {
+		t.Errorf("failures = %+v, want one INFRASTRUCTURE", failures)
+	}
+	var active int
+	if err := pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM leases WHERE attempt_id = $1 AND released_at IS NULL", claimed.Attempt.ID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Errorf("active leases = %d, want 0 after recovery", active)
+	}
+
+	again, found, err := svc.Claim(t.Context(), alive)
+	if err != nil || !found {
+		t.Fatalf("reclaim: found %v, err %v", found, err)
+	}
+	if again.Attempt.AttemptNumber != 2 {
+		t.Errorf("attempt number = %d, want 2", again.Attempt.AttemptNumber)
+	}
+}
+
 func TestConcurrentTicksNeverOverfill(t *testing.T) {
 	pool := storetest.NewPool(t)
 	w := addWorker(t, pool, "w", 2)

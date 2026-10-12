@@ -15,25 +15,27 @@ import (
 
 const acquireLease = `-- name: AcquireLease :one
 INSERT INTO leases (id, job_id, attempt_id, worker_id, expires_at)
-VALUES ($1, $2, $3, $4, $5)
+VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5::double precision))
 RETURNING id, job_id, attempt_id, worker_id, acquired_at, expires_at, released_at
 `
 
 type AcquireLeaseParams struct {
-	ID        uuid.UUID
-	JobID     uuid.UUID
-	AttemptID uuid.UUID
-	WorkerID  uuid.UUID
-	ExpiresAt time.Time
+	ID         uuid.UUID
+	JobID      uuid.UUID
+	AttemptID  uuid.UUID
+	WorkerID   uuid.UUID
+	TtlSeconds float64
 }
 
+// AcquireLease records ownership of an attempt. expires_at is set from the
+// database clock so lease checks do not depend on the API host's clock.
 func (q *Queries) AcquireLease(ctx context.Context, arg AcquireLeaseParams) (Lease, error) {
 	row := q.db.QueryRow(ctx, acquireLease,
 		arg.ID,
 		arg.JobID,
 		arg.AttemptID,
 		arg.WorkerID,
-		arg.ExpiresAt,
+		arg.TtlSeconds,
 	)
 	var i Lease
 	err := row.Scan(
@@ -413,6 +415,57 @@ func (q *Queries) InsertLogChunk(ctx context.Context, arg InsertLogChunkParams) 
 	return result.RowsAffected(), nil
 }
 
+const listAbandonedScheduledJobs = `-- name: ListAbandonedScheduledJobs :many
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at
+FROM jobs j
+JOIN workers w ON w.id = j.assigned_worker_id
+WHERE j.state = 'SCHEDULED'
+  AND w.last_heartbeat_at < now() - make_interval(secs => $1::double precision)
+ORDER BY j.created_at, j.number
+LIMIT $2
+FOR UPDATE OF j SKIP LOCKED
+`
+
+type ListAbandonedScheduledJobsParams struct {
+	StaleSeconds float64
+	RowLimit     int32
+}
+
+// ListAbandonedScheduledJobs finds SCHEDULED jobs whose worker has gone
+// offline before claiming them.
+func (q *Queries) ListAbandonedScheduledJobs(ctx context.Context, arg ListAbandonedScheduledJobsParams) ([]Job, error) {
+	rows, err := q.db.Query(ctx, listAbandonedScheduledJobs, arg.StaleSeconds, arg.RowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Job{}
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Number,
+			&i.WorkloadID,
+			&i.State,
+			&i.AssignedWorkerID,
+			&i.ScheduledAt,
+			&i.CancelRequestedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listArtifacts = `-- name: ListArtifacts :many
 SELECT id, job_id, attempt_id, name, content_type, storage_key, size_bytes, sha256, created_at FROM artifacts
 WHERE job_id = $1
@@ -543,6 +596,61 @@ func (q *Queries) ListCancelRequestedAttempts(ctx context.Context, workerID uuid
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listExpiredLeases = `-- name: ListExpiredLeases :many
+SELECT l.id, l.job_id, l.attempt_id, l.worker_id, l.acquired_at, l.expires_at, l.released_at,
+       j.state AS job_state
+FROM leases l
+JOIN jobs j ON j.id = l.job_id
+WHERE l.released_at IS NULL
+  AND l.expires_at <= now()
+  AND j.state IN ('PREPARING', 'EXECUTING', 'VERIFYING')
+ORDER BY l.expires_at, l.id
+LIMIT $1
+FOR UPDATE OF l, j SKIP LOCKED
+`
+
+type ListExpiredLeasesRow struct {
+	ID         uuid.UUID
+	JobID      uuid.UUID
+	AttemptID  uuid.UUID
+	WorkerID   uuid.UUID
+	AcquiredAt time.Time
+	ExpiresAt  time.Time
+	ReleasedAt *time.Time
+	JobState   string
+}
+
+// ListExpiredLeases locks expired, still-active leases whose jobs are mid-run,
+// so recovery can requeue them without racing another scheduler.
+func (q *Queries) ListExpiredLeases(ctx context.Context, rowLimit int32) ([]ListExpiredLeasesRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredLeases, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredLeasesRow{}
+	for rows.Next() {
+		var i ListExpiredLeasesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.AttemptID,
+			&i.WorkerID,
+			&i.AcquiredAt,
+			&i.ExpiresAt,
+			&i.ReleasedAt,
+			&i.JobState,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -787,4 +895,40 @@ type RecordAttemptExitParams struct {
 func (q *Queries) RecordAttemptExit(ctx context.Context, arg RecordAttemptExitParams) error {
 	_, err := q.db.Exec(ctx, recordAttemptExit, arg.ExitCode, arg.ID)
 	return err
+}
+
+const releaseLeaseByAttempt = `-- name: ReleaseLeaseByAttempt :execrows
+UPDATE leases
+SET released_at = now()
+WHERE attempt_id = $1 AND released_at IS NULL
+`
+
+func (q *Queries) ReleaseLeaseByAttempt(ctx context.Context, attemptID uuid.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, releaseLeaseByAttempt, attemptID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const renewWorkerLeases = `-- name: RenewWorkerLeases :execrows
+UPDATE leases
+SET expires_at = now() + make_interval(secs => $1::double precision)
+WHERE worker_id = $2
+  AND released_at IS NULL
+  AND expires_at > now()
+`
+
+type RenewWorkerLeasesParams struct {
+	TtlSeconds float64
+	WorkerID   uuid.UUID
+}
+
+// RenewWorkerLeases extends every still-valid lease held by a worker.
+func (q *Queries) RenewWorkerLeases(ctx context.Context, arg RenewWorkerLeasesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewWorkerLeases, arg.TtlSeconds, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

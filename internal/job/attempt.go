@@ -202,6 +202,9 @@ func endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from State,
 	if _, err := q.FinishAttempt(ctx, db.FinishAttemptParams{ID: a.ID, Status: o.status, Error: errText}); err != nil {
 		return fmt.Errorf("finish attempt: %w", err)
 	}
+	if _, err := q.ReleaseLeaseByAttempt(ctx, a.ID); err != nil {
+		return fmt.Errorf("release lease: %w", err)
+	}
 	if o.category == "" {
 		return nil
 	}

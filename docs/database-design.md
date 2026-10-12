@@ -98,7 +98,7 @@ erDiagram
 
 State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = $1 AND state = $from`). If another actor changed the job first, the update matches no row and the caller sees `pgx.ErrNoRows` instead of silently overwriting the newer state. Only `job.Transition` calls it: it checks the legal transitions first, then writes the update, its history row, and a `job.state_changed` event in one transaction (`store.WithTx`), and turns a missed update into `ErrConflict` or `ErrNotFound` ([ADR 0004](adr/0004-job-state-machine.md)).
 
-`TransitionJob` can also set `assigned_worker_id` in the same statement, so a job is never `SCHEDULED` without its worker. It also maintains the job's timestamps: `started_at` is set the first time the job enters `PREPARING` and never changes after that, and `finished_at` is set when it enters `COMPLETED`, `FAILED`, or `CANCELLED`.
+`TransitionJob` can also set `assigned_worker_id` in the same statement, so a job is never `SCHEDULED` without its worker. Recovery requeues clear that assignment (`clear_worker`) and any pending cancel (`clear_cancel`) in the same update. It also maintains the job's timestamps: `started_at` is set the first time the job enters `PREPARING` and never changes after that, and `finished_at` is set when it enters `COMPLETED`, `FAILED`, or `CANCELLED`.
 
 ## Read paths
 
@@ -121,6 +121,11 @@ State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = 
 | `LockQueuedJobs`         | Oldest placeable `QUEUED` jobs, `FOR UPDATE SKIP LOCKED`; served by `jobs_queue_idx`         |
 | `LockNextAssignedJob`    | A worker's oldest `SCHEDULED` job, `FOR UPDATE SKIP LOCKED`; served by `jobs_assigned_worker_idx` |
 | `NextAttemptNumber`      | The next attempt number for a job; `UNIQUE (job_id, attempt_number)` backs it up            |
+| `AcquireLease`           | Inserts a lease whose `expires_at` is `now() + ttl` from the database clock                |
+| `RenewWorkerLeases`      | Extends every still-valid lease held by a worker (heartbeat)                               |
+| `ReleaseLeaseByAttempt`  | Sets `released_at` on the attempt's active lease                                           |
+| `ListExpiredLeases`      | Locks expired mid-run leases and their jobs for recovery (`FOR UPDATE SKIP LOCKED`)        |
+| `ListAbandonedScheduledJobs` | Locks `SCHEDULED` jobs whose worker is offline for requeue                            |
 
 `SKIP LOCKED` lets concurrent claimers pass over a row another transaction is taking instead of queueing behind it. A claim that finds nothing locked or assigned returns no row rather than waiting.
 

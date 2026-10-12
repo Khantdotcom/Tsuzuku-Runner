@@ -72,6 +72,8 @@ type Server struct {
 	WorkerStaleAfter time.Duration `env:"TSUZUKU_WORKER_STALE_AFTER" envDefault:"15s"`
 	// SchedulerInterval is the time between scheduling rounds.
 	SchedulerInterval time.Duration `env:"TSUZUKU_SCHEDULER_INTERVAL" envDefault:"1s"`
+	// LeaseTTL is how long a claimed attempt stays owned without a renewing heartbeat.
+	LeaseTTL time.Duration `env:"TSUZUKU_LEASE_TTL" envDefault:"30s"`
 	// ArtifactDir is where job evidence files, such as logs, are stored.
 	ArtifactDir string `env:"TSUZUKU_ARTIFACT_DIR" envDefault:"./data/artifacts"`
 	// MaxLogBytes is how much output one attempt may store; the rest is dropped.
@@ -136,6 +138,9 @@ func loadServer(environ map[string]string) (Server, error) {
 	}
 	if cfg.SchedulerInterval < 100*time.Millisecond {
 		return Server{}, fmt.Errorf("TSUZUKU_SCHEDULER_INTERVAL must be at least 100ms, got %s", cfg.SchedulerInterval)
+	}
+	if cfg.LeaseTTL < time.Second {
+		return Server{}, fmt.Errorf("TSUZUKU_LEASE_TTL must be at least 1s, got %s", cfg.LeaseTTL)
 	}
 	if err := cfg.WorkloadLimits.validate(); err != nil {
 		return Server{}, err

@@ -110,11 +110,11 @@ func TestOnlyOneActiveLeasePerJob(t *testing.T) {
 
 	lease := func() (db.Lease, error) {
 		return q.AcquireLease(ctx, db.AcquireLeaseParams{
-			ID:        uuid.Must(uuid.NewV7()),
-			JobID:     f.job.ID,
-			AttemptID: f.attempt.ID,
-			WorkerID:  f.worker.ID,
-			ExpiresAt: time.Now().Add(time.Minute),
+			ID:         uuid.Must(uuid.NewV7()),
+			JobID:      f.job.ID,
+			AttemptID:  f.attempt.ID,
+			WorkerID:   f.worker.ID,
+			TtlSeconds: 60,
 		})
 	}
 

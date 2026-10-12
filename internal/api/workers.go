@@ -35,6 +35,7 @@ var workerNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 type WorkerStore interface {
 	UpsertWorker(ctx context.Context, arg db.UpsertWorkerParams) (db.Worker, error)
 	RecordHeartbeat(ctx context.Context, arg db.RecordHeartbeatParams) (int64, error)
+	RenewWorkerLeases(ctx context.Context, arg db.RenewWorkerLeasesParams) (int64, error)
 	ListWorkers(ctx context.Context) ([]db.ListWorkersRow, error)
 	WorkerExists(ctx context.Context, id uuid.UUID) (bool, error)
 	ListCancelRequestedAttempts(ctx context.Context, workerID uuid.UUID) ([]uuid.UUID, error)
@@ -122,6 +123,15 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		writeProblem(w, r, http.StatusNotFound, "worker is not registered")
 		return
+	}
+	if s.leaseTTL > 0 {
+		if _, err := s.workers.RenewWorkerLeases(r.Context(), db.RenewWorkerLeasesParams{
+			WorkerID:   id,
+			TtlSeconds: s.leaseTTL.Seconds(),
+		}); err != nil {
+			s.internalError(w, r, "renew leases", err)
+			return
+		}
 	}
 	cancel, err := s.workers.ListCancelRequestedAttempts(r.Context(), id)
 	if err != nil {

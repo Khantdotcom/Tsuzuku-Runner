@@ -426,6 +426,9 @@ func TestClaim(t *testing.T) {
 	if got := count(t, pool, "SELECT count(*) FROM job_events WHERE job_id = $1 AND attempt_id = $2", assigned.ID, c.Attempt.ID); got != 1 {
 		t.Errorf("events linked to the attempt = %d, want 1", got)
 	}
+	if got := count(t, pool, "SELECT count(*) FROM leases WHERE job_id = $1 AND attempt_id = $2 AND released_at IS NULL", assigned.ID, c.Attempt.ID); got != 1 {
+		t.Errorf("active leases = %d, want 1", got)
+	}
 
 	if _, found, err := svc.Claim(t.Context(), w); err != nil || found {
 		t.Errorf("second Claim: found %v, err %v; want nothing left", found, err)

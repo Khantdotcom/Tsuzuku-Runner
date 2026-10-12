@@ -65,6 +65,9 @@ func TestLoadServerDefaults(t *testing.T) {
 	if cfg.SchedulerInterval != time.Second {
 		t.Errorf("SchedulerInterval = %s, want 1s", cfg.SchedulerInterval)
 	}
+	if cfg.LeaseTTL != 30*time.Second {
+		t.Errorf("LeaseTTL = %s, want 30s", cfg.LeaseTTL)
+	}
 	if cfg.ArtifactDir != "./data/artifacts" || cfg.MaxLogBytes != 10<<20 {
 		t.Errorf("ArtifactDir = %q, MaxLogBytes = %d", cfg.ArtifactDir, cfg.MaxLogBytes)
 	}
@@ -149,6 +152,7 @@ func TestLoadServerRejectsInvalidValues(t *testing.T) {
 		{"huge timeout limit", serverEnv(map[string]string{"TSUZUKU_WORKLOAD_MAX_TIMEOUT": "600000h"}), "TSUZUKU_WORKLOAD_MAX_TIMEOUT"},
 		{"tiny scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "10ms"}), "TSUZUKU_SCHEDULER_INTERVAL"},
 		{"negative scheduler interval", serverEnv(map[string]string{"TSUZUKU_SCHEDULER_INTERVAL": "-1s"}), "TSUZUKU_SCHEDULER_INTERVAL"},
+		{"tiny lease ttl", serverEnv(map[string]string{"TSUZUKU_LEASE_TTL": "500ms"}), "TSUZUKU_LEASE_TTL"},
 		{"blank artifact dir", serverEnv(map[string]string{"TSUZUKU_ARTIFACT_DIR": "  "}), "TSUZUKU_ARTIFACT_DIR"},
 		{"tiny log limit", serverEnv(map[string]string{"TSUZUKU_MAX_LOG_BYTES": "1000"}), "TSUZUKU_MAX_LOG_BYTES"},
 		{"bad log limit", serverEnv(map[string]string{"TSUZUKU_MAX_LOG_BYTES": "lots"}), "MaxLogBytes"},

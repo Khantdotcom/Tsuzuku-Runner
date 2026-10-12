@@ -92,7 +92,7 @@ curl http://localhost:8080/api/v1/workers
 task fe:install && task fe:dev   # dashboard with hot reload on http://localhost:3000
 ```
 
-The server needs the database to start. Stop the worker and it shows as `offline` after `TSUZUKU_WORKER_STALE_AFTER` (15s by default).
+The server needs the database to start. Stop the worker and it shows as `offline` after `TSUZUKU_WORKER_STALE_AFTER` (15s by default). Jobs still `SCHEDULED` on that worker, or mid-run with an expired lease (`TSUZUKU_LEASE_TTL`, 30s by default), are requeued on the next scheduling round.
 
 ### Common tasks
 

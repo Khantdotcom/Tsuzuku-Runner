@@ -50,11 +50,20 @@ LIMIT @row_limit;
 -- TransitionJob is a compare-and-set: it returns no row when the job is no
 -- longer in from_state, so concurrent transitions cannot both succeed.
 -- started_at keeps the first start; finished_at is set on every final state.
--- A non-NULL assign_worker_id sets the assigned worker in the same update.
+-- clear_worker drops the assignment (recovery requeue); otherwise a non-NULL
+-- assign_worker_id sets the assigned worker. clear_cancel drops a pending
+-- cancel when the job is put back on the queue.
 UPDATE jobs
 SET state              = @to_state,
     updated_at         = now(),
-    assigned_worker_id = coalesce(sqlc.narg(assign_worker_id)::uuid, assigned_worker_id),
+    assigned_worker_id = CASE
+        WHEN @clear_worker::boolean THEN NULL
+        ELSE coalesce(sqlc.narg(assign_worker_id)::uuid, assigned_worker_id)
+    END,
+    cancel_requested_at = CASE
+        WHEN @clear_cancel::boolean THEN NULL
+        ELSE cancel_requested_at
+    END,
     started_at         = CASE WHEN @mark_started::boolean THEN coalesce(started_at, now()) ELSE started_at END,
     finished_at        = CASE WHEN @mark_finished::boolean THEN now() ELSE finished_at END
 WHERE id = @id AND state = @from_state

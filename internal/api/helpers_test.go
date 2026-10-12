@@ -32,6 +32,8 @@ type fakeWorkerStore struct {
 	heartbeats    []db.RecordHeartbeatParams
 	heartbeatRows int64
 	heartbeatErr  error
+	renewals      []db.RenewWorkerLeasesParams
+	renewErr      error
 	rows          []db.ListWorkersRow
 	listErr       error
 	missing       bool
@@ -73,6 +75,13 @@ func (f *fakeWorkerStore) RecordHeartbeat(_ context.Context, arg db.RecordHeartb
 	defer f.mu.Unlock()
 	f.heartbeats = append(f.heartbeats, arg)
 	return f.heartbeatRows, f.heartbeatErr
+}
+
+func (f *fakeWorkerStore) RenewWorkerLeases(_ context.Context, arg db.RenewWorkerLeasesParams) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renewals = append(f.renewals, arg)
+	return int64(len(f.renewals)), f.renewErr
 }
 
 func (f *fakeWorkerStore) ListWorkers(context.Context) ([]db.ListWorkersRow, error) {

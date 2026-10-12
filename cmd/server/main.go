@@ -54,6 +54,7 @@ func run() error {
 	jobs := job.NewService(pool,
 		job.WithArtifacts(artifacts),
 		job.WithMaxLogBytes(cfg.MaxLogBytes),
+		job.WithLeaseTTL(cfg.LeaseTTL),
 		job.WithLogger(logger),
 	)
 	assignments := scheduler.NewNotifier()
@@ -70,6 +71,7 @@ func run() error {
 		Stopping:         stopping,
 		WorkerToken:      cfg.Token,
 		WorkerStaleAfter: cfg.WorkerStaleAfter,
+		LeaseTTL:         cfg.LeaseTTL,
 		WorkloadLimits: workload.Limits{
 			MaxCPUMillis: cfg.MaxCPUMillis,
 			MaxMemoryMB:  cfg.MaxMemoryMB,

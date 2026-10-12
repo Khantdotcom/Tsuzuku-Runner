@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -114,6 +115,30 @@ func TestHeartbeat(t *testing.T) {
 	got := store.heartbeats[0]
 	if got.ID != id || *got.CpuUsedPercent != 37.5 || *got.MemoryUsedMB != 2048 {
 		t.Errorf("heartbeat = id %s cpu %v mem %v", got.ID, *got.CpuUsedPercent, *got.MemoryUsedMB)
+	}
+	if len(store.renewals) != 0 {
+		t.Errorf("renewals = %d, want 0 when LeaseTTL is unset", len(store.renewals))
+	}
+}
+
+func TestHeartbeatRenewsLeases(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	store := &fakeWorkerStore{heartbeatRows: 1}
+	h := NewRouter(Config{
+		Logger:           slog.New(slog.DiscardHandler),
+		DB:               fakePinger{},
+		Workers:          store,
+		WorkerToken:      testToken,
+		WorkerStaleAfter: testStaleAfter,
+		LeaseTTL:         30 * time.Second,
+	})
+	rec := serve(t, h, http.MethodPost, workerapi.HeartbeatPath(id),
+		`{"cpu_used_percent":1,"memory_used_mb":1}`, testToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	if len(store.renewals) != 1 || store.renewals[0].WorkerID != id || store.renewals[0].TtlSeconds != 30 {
+		t.Errorf("renewals = %+v, want one renew for worker with ttl 30", store.renewals)
 	}
 }
 

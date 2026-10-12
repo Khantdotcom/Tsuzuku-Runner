@@ -7,16 +7,20 @@ func TestTransitionTable(t *testing.T) {
 		{Queued, Scheduled}:    true,
 		{Queued, Cancelled}:    true,
 		{Scheduled, Preparing}: true,
+		{Scheduled, Queued}:    true,
 		{Scheduled, Cancelled}: true,
 		{Preparing, Executing}: true,
 		{Preparing, Failed}:    true,
 		{Preparing, Cancelled}: true,
+		{Preparing, Queued}:    true,
 		{Executing, Verifying}: true,
 		{Executing, Failed}:    true,
 		{Executing, Cancelled}: true,
+		{Executing, Queued}:    true,
 		{Verifying, Completed}: true,
 		{Verifying, Failed}:    true,
 		{Verifying, Cancelled}: true,
+		{Verifying, Queued}:    true,
 	}
 	for _, from := range States {
 		for _, to := range States {

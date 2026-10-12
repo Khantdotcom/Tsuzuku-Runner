@@ -59,6 +59,10 @@ type Change struct {
 	Reason string
 	// AssignWorker, when set, becomes the job's assigned worker in the same update.
 	AssignWorker *uuid.UUID
+	// ClearWorker drops the assigned worker (recovery requeue).
+	ClearWorker bool
+	// ClearCancel drops a pending cancel when the job is put back on the queue.
+	ClearCancel bool
 	// AttemptID, when set, links the timeline event to an attempt.
 	AttemptID *uuid.UUID
 	// Details are extra fields for the timeline event payload.
@@ -82,7 +86,9 @@ func Transition(ctx context.Context, q *db.Queries, c Change) (db.Job, error) {
 		ID:             c.JobID,
 		FromState:      string(c.From),
 		ToState:        string(c.To),
+		ClearWorker:    c.ClearWorker,
 		AssignWorkerID: c.AssignWorker,
+		ClearCancel:    c.ClearCancel,
 		MarkStarted:    c.To == Preparing,
 		MarkFinished:   c.To.Terminal(),
 	})
@@ -166,11 +172,15 @@ type ListParams struct {
 const DefaultMaxLogBytes = 10 << 20
 
 // Service reads and submits jobs.
+// DefaultLeaseTTL is how long a claimed attempt stays owned without a renewing heartbeat.
+const DefaultLeaseTTL = 30 * time.Second
+
 type Service struct {
 	pool        *pgxpool.Pool
 	q           *db.Queries
 	artifacts   artifact.Store
 	maxLogBytes int64
+	leaseTTL    time.Duration
 	logger      *slog.Logger
 }
 
@@ -192,6 +202,16 @@ func WithMaxLogBytes(n int64) Option {
 	}
 }
 
+// WithLeaseTTL sets how long a claim's lease lasts before recovery may requeue
+// the job. Zero or negative values keep the default.
+func WithLeaseTTL(d time.Duration) Option {
+	return func(s *Service) {
+		if d > 0 {
+			s.leaseTTL = d
+		}
+	}
+}
+
 // WithLogger reports best-effort work, such as storing artifacts, to l.
 func WithLogger(l *slog.Logger) Option {
 	return func(s *Service) { s.logger = l }
@@ -203,6 +223,7 @@ func NewService(pool *pgxpool.Pool, opts ...Option) *Service {
 		pool:        pool,
 		q:           db.New(pool),
 		maxLogBytes: DefaultMaxLogBytes,
+		leaseTTL:    DefaultLeaseTTL,
 		logger:      slog.New(slog.DiscardHandler),
 	}
 	for _, opt := range opts {
@@ -438,9 +459,10 @@ type Claimed struct {
 }
 
 // Claim starts the oldest SCHEDULED job assigned to workerID: it creates the
-// next attempt and moves the job to PREPARING in one transaction. found is
-// false when the worker has no job waiting. Concurrent claims never return
-// the same job, because the job row stays locked until the claim commits.
+// next attempt, takes a lease, and moves the job to PREPARING in one
+// transaction. found is false when the worker has no job waiting. Concurrent
+// claims never return the same job, because the job row stays locked until
+// the claim commits.
 func (s *Service) Claim(ctx context.Context, workerID uuid.UUID) (c Claimed, found bool, err error) {
 	err = store.WithTx(ctx, s.pool, func(q *db.Queries) error {
 		j, err := q.LockNextAssignedJob(ctx, &workerID)
@@ -472,6 +494,20 @@ func (s *Service) Claim(ctx context.Context, workerID uuid.UUID) (c Claimed, fou
 		})
 		if err != nil {
 			return fmt.Errorf("create attempt: %w", err)
+		}
+
+		leaseID, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		if _, err := q.AcquireLease(ctx, db.AcquireLeaseParams{
+			ID:         leaseID,
+			JobID:      j.ID,
+			AttemptID:  attemptID,
+			WorkerID:   workerID,
+			TtlSeconds: s.leaseTTL.Seconds(),
+		}); err != nil {
+			return fmt.Errorf("acquire lease: %w", err)
 		}
 
 		c.Job, err = Transition(ctx, q, Change{

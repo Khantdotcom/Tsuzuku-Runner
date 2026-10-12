@@ -15,7 +15,7 @@ How a plain PostgreSQL table works as a job queue that several schedulers and wo
 Getting a job running is two separate steps:
 
 1. **Placement (scheduler):** decide *where* the job runs. `QUEUED` becomes `SCHEDULED`, with `assigned_worker_id` set.
-2. **Claiming (worker):** decide *when* it starts. The worker asks for its next assigned job; the job becomes `PREPARING` and an attempt row is created.
+2. **Claiming (worker):** decide *when* it starts. The worker asks for its next assigned job; the job becomes `PREPARING`, an attempt row is created, and a lease is taken.
 
 **Why split them.**
 
@@ -96,12 +96,19 @@ The scheduler takes the oldest jobs first (first in, first out) and gives each o
 
 The placement logic (`scheduler.Place`) is a pure function: lists in, assignments out, with no database access. That makes the interesting decisions easy to unit-test, and keeps the database code to "load, decide, save".
 
-## Leases (coming with recovery)
+## Leases and recovery
 
-**The open problem.** If a worker crashes after claiming a job, the job sits in `PREPARING` forever. If a worker dies before claiming, its jobs sit in `SCHEDULED` forever.
+**The problem.** If a worker crashes after claiming a job, the job would sit in `PREPARING` forever. If a worker dies before claiming, its jobs would sit in `SCHEDULED` forever.
 
-**The idea.** A **lease** is ownership with an expiry time. The worker owns the job only until `expires_at` and must keep renewing it, much like a heartbeat for one job. If renewals stop, the lease expires, and a recovery process can safely give the job to someone else.
+**The idea.** A **lease** is ownership with an expiry time. The worker owns the attempt only until `expires_at` and must keep renewing it, much like a heartbeat for one job. If renewals stop, the lease expires, and the scheduler can safely give the job to someone else.
 
-**The detail that makes it safe.** When a worker comes back after its lease expired, its late reports must be rejected, because the job may already belong to another attempt. Checking the attempt ID on every report (a *fencing* check) prevents two workers from both believing they own the job.
+**The detail that makes it safe.** When a worker comes back after its lease expired, its late reports must be rejected, because the job may already belong to another attempt. Locking the attempt and requiring it still be `RUNNING` (a *fencing* check) prevents two workers from both believing they own the job.
 
-The `leases` table and its "at most one active lease per job" index already exist. Using them is planned for the recovery milestone.
+**In this project.**
+
+- Claiming inserts a `leases` row whose `expires_at` is `now() + TSUZUKU_LEASE_TTL` (30s by default), using the database clock so API host skew cannot fake ownership.
+- Each worker heartbeat runs `RenewWorkerLeases` for that worker's still-valid leases.
+- Ending an attempt releases its lease (`ReleaseLeaseByAttempt`).
+- Under the same advisory lock as placement, the scheduler requeues `SCHEDULED` jobs whose worker is offline, and for expired mid-run leases finishes the attempt as `FAILED` / `INFRASTRUCTURE` then moves the job `PREPARING|EXECUTING|VERIFYING` → `QUEUED` (clearing the worker and any pending cancel). A partial unique index still allows at most one active lease per job.
+
+See [Architecture: Scheduling and claiming](../architecture.md#scheduling-and-claiming) and [ADR 0003](../adr/0003-postgres-as-job-queue.md).

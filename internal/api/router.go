@@ -34,6 +34,8 @@ type Config struct {
 	WorkerToken string
 	// WorkerStaleAfter is how long after its last heartbeat a worker is reported offline.
 	WorkerStaleAfter time.Duration
+	// LeaseTTL is how long a claimed attempt stays owned; heartbeats renew leases by this amount.
+	LeaseTTL time.Duration
 	// WorkloadLimits caps the resources a submitted workload may request.
 	WorkloadLimits workload.Limits
 }
@@ -48,6 +50,7 @@ type server struct {
 	assignments      AssignmentSignal
 	stopping         <-chan struct{}
 	workerStaleAfter time.Duration
+	leaseTTL         time.Duration
 	workloadLimits   workload.Limits
 }
 
@@ -63,6 +66,7 @@ func NewRouter(cfg Config) http.Handler {
 		assignments:      cfg.Assignments,
 		stopping:         cfg.Stopping,
 		workerStaleAfter: cfg.WorkerStaleAfter,
+		leaseTTL:         cfg.LeaseTTL,
 		workloadLimits:   cfg.WorkloadLimits,
 	}
 

@@ -51,9 +51,51 @@ WHERE a.job_id = @job_id
 ORDER BY r.created_at, r.id;
 
 -- name: AcquireLease :one
+-- AcquireLease records ownership of an attempt. expires_at is set from the
+-- database clock so lease checks do not depend on the API host's clock.
 INSERT INTO leases (id, job_id, attempt_id, worker_id, expires_at)
-VALUES (@id, @job_id, @attempt_id, @worker_id, @expires_at)
+VALUES (@id, @job_id, @attempt_id, @worker_id, now() + make_interval(secs => @ttl_seconds::double precision))
 RETURNING *;
+
+-- name: RenewWorkerLeases :execrows
+-- RenewWorkerLeases extends every still-valid lease held by a worker.
+UPDATE leases
+SET expires_at = now() + make_interval(secs => @ttl_seconds::double precision)
+WHERE worker_id = @worker_id
+  AND released_at IS NULL
+  AND expires_at > now();
+
+-- name: ReleaseLeaseByAttempt :execrows
+UPDATE leases
+SET released_at = now()
+WHERE attempt_id = @attempt_id AND released_at IS NULL;
+
+-- name: ListExpiredLeases :many
+-- ListExpiredLeases locks expired, still-active leases whose jobs are mid-run,
+-- so recovery can requeue them without racing another scheduler.
+SELECT l.id, l.job_id, l.attempt_id, l.worker_id, l.acquired_at, l.expires_at, l.released_at,
+       j.state AS job_state
+FROM leases l
+JOIN jobs j ON j.id = l.job_id
+WHERE l.released_at IS NULL
+  AND l.expires_at <= now()
+  AND j.state IN ('PREPARING', 'EXECUTING', 'VERIFYING')
+ORDER BY l.expires_at, l.id
+LIMIT @row_limit
+FOR UPDATE OF l, j SKIP LOCKED;
+
+-- name: ListAbandonedScheduledJobs :many
+-- ListAbandonedScheduledJobs finds SCHEDULED jobs whose worker has gone
+-- offline before claiming them.
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at
+FROM jobs j
+JOIN workers w ON w.id = j.assigned_worker_id
+WHERE j.state = 'SCHEDULED'
+  AND w.last_heartbeat_at < now() - make_interval(secs => @stale_seconds::double precision)
+ORDER BY j.created_at, j.number
+LIMIT @row_limit
+FOR UPDATE OF j SKIP LOCKED;
 
 -- name: AppendLogChunk :one
 INSERT INTO log_chunks (job_id, attempt_id, seq, stream, data)

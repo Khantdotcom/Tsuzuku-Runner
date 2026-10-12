@@ -33,10 +33,10 @@ var States = []State{
 // their edges here.
 var transitions = map[State][]State{
 	Queued:    {Scheduled, Cancelled},
-	Scheduled: {Preparing, Cancelled},
-	Preparing: {Executing, Failed, Cancelled},
-	Executing: {Verifying, Failed, Cancelled},
-	Verifying: {Completed, Failed, Cancelled},
+	Scheduled: {Preparing, Queued, Cancelled},
+	Preparing: {Executing, Failed, Cancelled, Queued},
+	Executing: {Verifying, Failed, Cancelled, Queued},
+	Verifying: {Completed, Failed, Cancelled, Queued},
 }
 
 // Valid reports whether s is a known state.
