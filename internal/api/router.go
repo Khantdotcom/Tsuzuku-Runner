@@ -2,6 +2,7 @@
 package api
 
 import (
+	_ "embed"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,6 +13,9 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
+
+//go:embed openapi.yaml
+var openAPISpec []byte
 
 // Config holds the API's dependencies and settings.
 type Config struct {
@@ -77,16 +81,20 @@ func NewRouter(cfg Config) http.Handler {
 
 	r.Get("/healthz", handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
+	r.Get("/openapi.yaml", handleOpenAPI)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/workers", s.handleListWorkers)
+		r.Get("/stats", s.handleStats)
 
 		r.Post("/workloads", s.handleSubmitWorkload)
 		r.Get("/jobs", s.handleListJobs)
 		r.Get("/jobs/{id}", s.handleGetJob)
 		r.Get("/jobs/{id}/attempts", s.handleListAttempts)
 		r.Get("/jobs/{id}/events", s.handleListEvents)
+		r.Get("/jobs/{id}/events/stream", s.handleStreamEvents)
 		r.Get("/jobs/{id}/logs", s.handleListLogs)
+		r.Get("/jobs/{id}/logs/stream", s.handleStreamLogs)
 		r.Post("/jobs/{id}/cancel", s.handleCancelJob)
 		r.Get("/jobs/{id}/evidence", s.handleGetEvidence)
 		r.Get("/jobs/{id}/artifacts", s.handleListArtifacts)

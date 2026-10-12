@@ -22,14 +22,16 @@ import (
 const validWorkload = `{"repository":"https://github.com/example/app","revision":"main","command":"go test ./..."}`
 
 type submitCall struct {
-	spec workload.Spec
-	key  string
+	spec        workload.Spec
+	key         string
+	scheduledAt *time.Time
 }
 
 type fakeJobService struct {
 	submits   []submitCall
 	submitErr error
 	replayed  bool
+	stats     job.Stats
 
 	job     db.Job
 	findErr error
@@ -81,15 +83,17 @@ func (f *fakeJobService) OpenArtifact(context.Context, uuid.UUID, uuid.UUID) (db
 	return f.artifact, io.NopCloser(strings.NewReader(f.content)), nil
 }
 
-func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string) (job.Submission, error) {
-	f.submits = append(f.submits, submitCall{spec, key})
+func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string, scheduledAt *time.Time) (job.Submission, error) {
+	f.submits = append(f.submits, submitCall{spec, key, scheduledAt})
 	if f.submitErr != nil {
 		return job.Submission{}, f.submitErr
 	}
 	raw, _ := json.Marshal(spec)
+	j := f.job
+	j.ScheduledAt = scheduledAt
 	return job.Submission{
 		Detail: job.Detail{
-			Job:      f.job,
+			Job:      j,
 			Workload: db.Workload{ID: f.job.WorkloadID, Spec: raw},
 			Transitions: []db.StateTransition{
 				{JobID: f.job.ID, ToState: "QUEUED", Actor: "api", Reason: "workload submitted"},
@@ -97,6 +101,10 @@ func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key strin
 		},
 		Replayed: f.replayed,
 	}, nil
+}
+
+func (f *fakeJobService) Stats(context.Context) (job.Stats, error) {
+	return f.stats, nil
 }
 
 func (f *fakeJobService) Find(_ context.Context, ref job.Ref) (db.Job, error) {
@@ -120,13 +128,31 @@ func (f *fakeJobService) Attempts(context.Context, uuid.UUID) ([]db.JobAttempt, 
 func (f *fakeJobService) Events(_ context.Context, _ uuid.UUID, after int64, limit int32) ([]db.JobEvent, error) {
 	f.afters = append(f.afters, after)
 	f.limits = append(f.limits, limit)
-	return f.events, nil
+	out := make([]db.JobEvent, 0, len(f.events))
+	for _, e := range f.events {
+		if e.ID > after {
+			out = append(out, e)
+			if int32(len(out)) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeJobService) Logs(_ context.Context, _ uuid.UUID, after int64, limit int32) ([]db.LogChunk, error) {
 	f.afters = append(f.afters, after)
 	f.limits = append(f.limits, limit)
-	return f.chunks, nil
+	out := make([]db.LogChunk, 0, len(f.chunks))
+	for _, c := range f.chunks {
+		if c.ID > after {
+			out = append(out, c)
+			if int32(len(out)) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func newJobsRouter(jobs *fakeJobService) http.Handler {
@@ -504,5 +530,52 @@ func TestListLogs(t *testing.T) {
 	}
 	if rec := serve(t, h, http.MethodGet, "/api/v1/jobs/7/logs?limit=1001", "", ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("limit=1001: status = %d, want 400", rec.Code)
+	}
+}
+
+func TestStats(t *testing.T) {
+	jobs := &fakeJobService{stats: job.Stats{Queued: 2, Running: 3, Completed: 10, Failed: 1, Cancelled: 1}}
+	rec := serve(t, newJobsRouter(jobs), http.MethodGet, "/api/v1/stats", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var body job.Stats
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body != jobs.stats {
+		t.Errorf("stats = %+v, want %+v", body, jobs.stats)
+	}
+}
+
+func TestSubmitScheduledAt(t *testing.T) {
+	jobs := &fakeJobService{}
+	at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	body := `{"repository":"https://github.com/example/app","revision":"main","command":"go test ./...","scheduled_at":"` + at.Format(time.RFC3339) + `"}`
+	rec := submit(t, newJobsRouter(jobs), body, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(jobs.submits) != 1 || jobs.submits[0].scheduledAt == nil || !jobs.submits[0].scheduledAt.Equal(at) {
+		t.Fatalf("submit = %+v, want scheduled_at %s", jobs.submits, at)
+	}
+}
+
+func TestSubmitPastScheduledAt(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	body := `{"repository":"https://github.com/example/app","revision":"main","command":"go test ./...","scheduled_at":"` + past + `"}`
+	rec := submit(t, newJobsRouter(&fakeJobService{}), body, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+}
+
+func TestOpenAPI(t *testing.T) {
+	rec := serve(t, newJobsRouter(&fakeJobService{}), http.MethodGet, "/openapi.yaml", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "openapi:") || !strings.Contains(rec.Body.String(), "/api/v1/stats") {
+		t.Fatalf("unexpected body: %s", rec.Body.String()[:min(200, rec.Body.Len())])
 	}
 }

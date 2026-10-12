@@ -25,7 +25,8 @@ const (
 
 // JobService is what the job endpoints need. *job.Service implements it.
 type JobService interface {
-	Submit(ctx context.Context, spec workload.Spec, idempotencyKey string) (job.Submission, error)
+	Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (job.Submission, error)
+	Stats(ctx context.Context) (job.Stats, error)
 	Find(ctx context.Context, ref job.Ref) (db.Job, error)
 	Detail(ctx context.Context, j db.Job) (job.Detail, error)
 	List(ctx context.Context, p job.ListParams) ([]db.ListJobsRow, error)
@@ -125,13 +126,17 @@ func (s *server) handleSubmitWorkload(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req, true) {
 		return
 	}
+	if err := req.ValidateScheduledAt(time.Now()); err != nil {
+		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	spec, err := req.Normalize(s.workloadLimits)
 	if err != nil {
 		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
-	sub, err := s.jobs.Submit(r.Context(), spec, key)
+	sub, err := s.jobs.Submit(r.Context(), spec, key, req.ScheduledAt)
 	if errors.Is(err, job.ErrIdempotencyMismatch) {
 		writeProblem(w, r, http.StatusConflict, "this Idempotency-Key was already used for a different workload")
 		return
@@ -151,6 +156,15 @@ func (s *server) handleSubmitWorkload(w http.ResponseWriter, r *http.Request) {
 			"job_id", sub.Job.ID, "job_number", sub.Job.Number, "repository", spec.Repository)
 	}
 	writeJSON(w, status, newJobDetailView(sub.Detail))
+}
+
+func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.jobs.Stats(r.Context())
+	if err != nil {
+		s.internalError(w, r, "job stats", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func (s *server) handleListJobs(w http.ResponseWriter, r *http.Request) {
