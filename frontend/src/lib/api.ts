@@ -193,6 +193,7 @@ export interface WorkloadRequest {
   timeout_seconds?: number;
   runtime?: { image?: string; network?: boolean };
   verification?: { command: string };
+  executor?: { kind?: string; prompt?: string };
   scheduled_at?: string;
   priority?: number;
 }

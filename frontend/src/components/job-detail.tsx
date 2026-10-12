@@ -228,29 +228,57 @@ export function JobDetailView({ id }: { id: string }) {
           {(evidence.data?.verifications ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground">No verification runs yet.</p>
           )}
-          {(evidence.data?.verifications ?? []).map((v) => (
-            <Card key={v.id} title={`Run ${v.status}`}>
-              {v.checks.map((c) => (
-                <div key={c.name} className="border-b border-border/50 py-2 text-sm last:border-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{c.name}</span>
-                    <span>{c.status}</span>
+          {(evidence.data?.verifications ?? []).map((v) => {
+            const byKind = new Map<string, typeof v.checks>();
+            for (const c of v.checks) {
+              const list = byKind.get(c.kind) ?? [];
+              list.push(c);
+              byKind.set(c.kind, list);
+            }
+            const kindOrder = ["exit_code", "command", "acceptance", "integrity"];
+            const kinds = [
+              ...kindOrder.filter((k) => byKind.has(k)),
+              ...[...byKind.keys()].filter((k) => !kindOrder.includes(k)),
+            ];
+            return (
+              <Card key={v.id} title={`Run ${v.status}`}>
+                {kinds.map((kind) => (
+                  <div key={kind} className="mb-3 last:mb-0">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      {kind}
+                    </div>
+                    {(byKind.get(kind) ?? []).map((c) => (
+                      <div key={c.name} className="border-b border-border/50 py-2 text-sm last:border-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{c.name}</span>
+                          <span>{c.status}</span>
+                        </div>
+                        {c.command && <code className="text-xs text-muted-foreground">{c.command}</code>}
+                        {c.output && (
+                          <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">
+                            {c.output}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                  {c.command && <code className="text-xs text-muted-foreground">{c.command}</code>}
-                  {c.output && (
-                    <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted p-2 text-xs">
-                      {c.output}
-                    </pre>
-                  )}
-                </div>
-              ))}
-            </Card>
-          ))}
+                ))}
+              </Card>
+            );
+          })}
         </div>
       )}
 
       {tab === "artifacts" && (
         <Card title="Artifacts">
+          <div className="mb-3">
+            <a
+              href={`/api/v1/jobs/${j.id}/evidence/bundle`}
+              className="text-sm text-primary hover:underline"
+            >
+              Download evidence zip
+            </a>
+          </div>
           {(evidence.data?.artifacts ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground">No artifacts yet.</p>
           )}

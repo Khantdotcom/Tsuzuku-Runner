@@ -52,7 +52,8 @@ LIMIT @row_limit;
 -- started_at keeps the first start; finished_at is set on every final state.
 -- clear_worker drops the assignment (recovery requeue); otherwise a non-NULL
 -- assign_worker_id sets the assigned worker. clear_cancel drops a pending
--- cancel when the job is put back on the queue.
+-- cancel when the job is put back on the queue. set_scheduled_at writes
+-- scheduled_at (NULL clears it) for retry backoff and promotion.
 UPDATE jobs
 SET state              = @to_state,
     updated_at         = now(),
@@ -63,6 +64,10 @@ SET state              = @to_state,
     cancel_requested_at = CASE
         WHEN @clear_cancel::boolean THEN NULL
         ELSE cancel_requested_at
+    END,
+    scheduled_at       = CASE
+        WHEN @set_scheduled_at::boolean THEN sqlc.narg(scheduled_at)::timestamptz
+        ELSE scheduled_at
     END,
     started_at         = CASE WHEN @mark_started::boolean THEN coalesce(started_at, now()) ELSE started_at END,
     finished_at        = CASE WHEN @mark_finished::boolean THEN now() ELSE finished_at END
@@ -84,6 +89,17 @@ RETURNING *;
 -- It returns false when another transaction holds it; the lock is released
 -- at commit or rollback.
 SELECT pg_try_advisory_xact_lock(@lock_key::bigint) AS locked;
+
+-- name: LockDueRetryingJobs :many
+-- LockDueRetryingJobs returns RETRYING jobs whose backoff has elapsed,
+-- locking them so the scheduler can promote them to QUEUED once.
+SELECT *
+FROM jobs
+WHERE state = 'RETRYING'
+  AND (scheduled_at IS NULL OR scheduled_at <= now())
+ORDER BY priority DESC, created_at, number
+LIMIT @row_limit
+FOR UPDATE SKIP LOCKED;
 
 -- name: LockQueuedJobs :many
 -- LockQueuedJobs returns placeable QUEUED jobs (higher priority first, then

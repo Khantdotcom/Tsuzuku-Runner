@@ -49,9 +49,10 @@ func (s *Service) cancelOnce(ctx context.Context, jobID uuid.UUID) (j db.Job, im
 		switch {
 		case state.Terminal():
 			return fmt.Errorf("%w: job %d is %s", ErrJobFinished, cur.Number, state)
-		case state == Queued || state == Scheduled:
+		case state == Queued || state == Scheduled || state == Retrying:
 			j, err = Transition(ctx, q, Change{
 				JobID: jobID, From: state, To: Cancelled, Actor: ActorAPI, Reason: "cancelled on request",
+				ClearWorker: true, SetScheduledAt: state == Retrying,
 			})
 			immediate = err == nil
 			return err

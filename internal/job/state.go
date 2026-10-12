@@ -28,15 +28,15 @@ var States = []State{
 	Completed, Failed, Retrying, Repairing, Blocked, Cancelled,
 }
 
-// transitions is the complete set of legal state changes. RETRYING,
-// REPAIRING, and BLOCKED have none yet: the milestones that use them add
-// their edges here.
+// transitions is the complete set of legal state changes. REPAIRING has none
+// yet: the milestone that uses it will add edges here.
 var transitions = map[State][]State{
 	Queued:    {Scheduled, Cancelled},
 	Scheduled: {Preparing, Queued, Cancelled},
-	Preparing: {Executing, Failed, Cancelled, Queued},
-	Executing: {Verifying, Failed, Cancelled, Queued},
-	Verifying: {Completed, Failed, Cancelled, Queued},
+	Preparing: {Executing, Failed, Cancelled, Queued, Retrying, Blocked},
+	Executing: {Verifying, Failed, Cancelled, Queued, Retrying, Blocked},
+	Verifying: {Completed, Failed, Cancelled, Queued, Retrying, Blocked},
+	Retrying:  {Queued, Failed, Cancelled},
 }
 
 // Valid reports whether s is a known state.
@@ -46,7 +46,7 @@ func (s State) Valid() bool {
 
 // Terminal reports whether s is a final state that a job never leaves.
 func (s State) Terminal() bool {
-	return s == Completed || s == Failed || s == Cancelled
+	return s == Completed || s == Failed || s == Cancelled || s == Blocked
 }
 
 // CanTransition reports whether a job may move from one state to another.

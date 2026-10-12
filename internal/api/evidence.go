@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -119,6 +120,32 @@ func (s *server) handleGetEvidence(w http.ResponseWriter, r *http.Request) {
 		"verifications": verifications,
 		"failures":      failures,
 	})
+}
+
+func (s *server) handleDownloadEvidenceBundle(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.findJob(w, r)
+	if !ok {
+		return
+	}
+	var buf bytes.Buffer
+	name, err := s.jobs.BundleZip(r.Context(), j.ID, &buf)
+	if errors.Is(err, job.ErrArtifactNotFound) {
+		writeProblem(w, r, http.StatusNotFound, "evidence bundle not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, "build evidence bundle", err)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/zip")
+	h.Set("Content-Length", strconv.Itoa(buf.Len()))
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, &buf); err != nil {
+		s.logger.WarnContext(r.Context(), "send evidence bundle", "job_id", j.ID, "err", err)
+	}
 }
 
 func (s *server) handleListArtifacts(w http.ResponseWriter, r *http.Request) {

@@ -16,6 +16,7 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/metrics"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/scheduler"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
@@ -55,10 +56,12 @@ func run() error {
 		job.WithArtifacts(artifacts),
 		job.WithMaxLogBytes(cfg.MaxLogBytes),
 		job.WithLeaseTTL(cfg.LeaseTTL),
+		job.WithRetryPolicy(cfg.JobMaxAttempts, cfg.RetryBackoffBase, cfg.RetryBackoffCap),
 		job.WithLogger(logger),
 	)
 	assignments := scheduler.NewNotifier()
 	stopping := make(chan struct{})
+	met := metrics.New()
 
 	router := api.NewRouter(api.Config{
 		Logger:           logger,
@@ -77,6 +80,7 @@ func run() error {
 			MaxMemoryMB:  cfg.MaxMemoryMB,
 			MaxTimeout:   cfg.MaxTimeout,
 		},
+		Metrics: met,
 	})
 
 	// No WriteTimeout: later milestones stream logs over long-lived SSE connections.
@@ -92,6 +96,7 @@ func run() error {
 		Interval:   cfg.SchedulerInterval,
 		StaleAfter: cfg.WorkerStaleAfter,
 		Notifier:   assignments,
+		Metrics:    met,
 	})
 	schedCtx, stopSched := context.WithCancel(ctx)
 	schedDone := make(chan struct{})

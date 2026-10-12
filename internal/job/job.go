@@ -63,6 +63,10 @@ type Change struct {
 	ClearWorker bool
 	// ClearCancel drops a pending cancel when the job is put back on the queue.
 	ClearCancel bool
+	// SetScheduledAt writes ScheduledAt (nil clears it). Used for retry backoff
+	// and for clearing the time when a RETRYING job returns to QUEUED.
+	SetScheduledAt bool
+	ScheduledAt    *time.Time
 	// AttemptID, when set, links the timeline event to an attempt.
 	AttemptID *uuid.UUID
 	// Details are extra fields for the timeline event payload.
@@ -89,6 +93,8 @@ func Transition(ctx context.Context, q *db.Queries, c Change) (db.Job, error) {
 		ClearWorker:    c.ClearWorker,
 		AssignWorkerID: c.AssignWorker,
 		ClearCancel:    c.ClearCancel,
+		SetScheduledAt: c.SetScheduledAt,
+		ScheduledAt:    c.ScheduledAt,
 		MarkStarted:    c.To == Preparing,
 		MarkFinished:   c.To.Terminal(),
 	})
@@ -176,12 +182,15 @@ const DefaultMaxLogBytes = 10 << 20
 const DefaultLeaseTTL = 30 * time.Second
 
 type Service struct {
-	pool        *pgxpool.Pool
-	q           *db.Queries
-	artifacts   artifact.Store
-	maxLogBytes int64
-	leaseTTL    time.Duration
-	logger      *slog.Logger
+	pool            *pgxpool.Pool
+	q               *db.Queries
+	artifacts       artifact.Store
+	maxLogBytes     int64
+	leaseTTL        time.Duration
+	maxAttempts     int
+	retryBackoff    time.Duration
+	retryBackoffCap time.Duration
+	logger          *slog.Logger
 }
 
 // Option configures a Service.
@@ -212,6 +221,22 @@ func WithLeaseTTL(d time.Duration) Option {
 	}
 }
 
+// WithRetryPolicy sets how many attempts a job may make and the exponential
+// backoff between them. Non-positive values keep the defaults.
+func WithRetryPolicy(maxAttempts int, base, backoffCap time.Duration) Option {
+	return func(s *Service) {
+		if maxAttempts > 0 {
+			s.maxAttempts = maxAttempts
+		}
+		if base > 0 {
+			s.retryBackoff = base
+		}
+		if backoffCap > 0 {
+			s.retryBackoffCap = backoffCap
+		}
+	}
+}
+
 // WithLogger reports best-effort work, such as storing artifacts, to l.
 func WithLogger(l *slog.Logger) Option {
 	return func(s *Service) { s.logger = l }
@@ -220,11 +245,14 @@ func WithLogger(l *slog.Logger) Option {
 // NewService returns a Service backed by pool.
 func NewService(pool *pgxpool.Pool, opts ...Option) *Service {
 	s := &Service{
-		pool:        pool,
-		q:           db.New(pool),
-		maxLogBytes: DefaultMaxLogBytes,
-		leaseTTL:    DefaultLeaseTTL,
-		logger:      slog.New(slog.DiscardHandler),
+		pool:            pool,
+		q:               db.New(pool),
+		maxLogBytes:     DefaultMaxLogBytes,
+		leaseTTL:        DefaultLeaseTTL,
+		maxAttempts:     DefaultMaxAttempts,
+		retryBackoff:    DefaultRetryBackoffBase,
+		retryBackoffCap: DefaultRetryBackoffCap,
+		logger:          slog.New(slog.DiscardHandler),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -325,12 +353,12 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 			out.Queued = row.Count
 		case Scheduled:
 			out.Scheduled = row.Count
-		case Preparing, Executing, Verifying:
+		case Preparing, Executing, Verifying, Retrying:
 			out.Running += row.Count
 		case Completed:
 			out.Completed = row.Count
-		case Failed:
-			out.Failed = row.Count
+		case Failed, Blocked:
+			out.Failed += row.Count
 		case Cancelled:
 			out.Cancelled = row.Count
 		}

@@ -111,6 +111,14 @@ SELECT pg_try_advisory_xact_lock(32778045701319541);
 - Claiming inserts a `leases` row whose `expires_at` is `now() + TSUZUKU_LEASE_TTL` (30s by default), using the database clock so API host skew cannot fake ownership.
 - Each worker heartbeat runs `RenewWorkerLeases` for that worker's still-valid leases.
 - Ending an attempt releases its lease (`ReleaseLeaseByAttempt`).
-- Under the same advisory lock as placement, the scheduler requeues `SCHEDULED` jobs whose worker is offline, and for expired mid-run leases finishes the attempt as `FAILED` / `INFRASTRUCTURE` then moves the job `PREPARING|EXECUTING|VERIFYING` → `QUEUED` (clearing the worker and any pending cancel). A partial unique index still allows at most one active lease per job.
+- Under the same advisory lock as placement, the scheduler requeues `SCHEDULED` jobs whose worker is offline, for expired mid-run leases finishes the attempt as `FAILED` / `INFRASTRUCTURE` then moves the job `PREPARING|EXECUTING|VERIFYING` → `QUEUED` (clearing the worker and any pending cancel), and promotes due `RETRYING` jobs to `QUEUED`. A partial unique index still allows at most one active lease per job.
+
+## Retries with backoff
+
+**The problem.** A transient failure (image pull blip, network flap, timeout) should not end the job, but retrying immediately can stampede the same overloaded dependency. A test failure should not burn another attempt.
+
+**The idea.** Classify the failure, then either fail, block for a human, or wait with **exponential backoff** before the next attempt. The wait doubles after each failed attempt up to a cap, so the system backs off under pressure without waiting forever after the first glitch.
+
+**In this project.** `job.applyPolicy` runs inside `endAttempt` after a classified failure. Retryable categories move the job to `RETRYING` and set `scheduled_at` to now plus `RetryBackoff(attemptNumber)` (`TSUZUKU_RETRY_BACKOFF_BASE` default 1s, `TSUZUKU_RETRY_BACKOFF_CAP` 5m). The attempt row still ends `FAILED` and a `failures` row is kept for the timeline. The scheduler's `LockDueRetryingJobs` promotes due rows to `QUEUED` under the advisory lock before placement. After `TSUZUKU_JOB_MAX_ATTEMPTS` (default 3) a retryable failure becomes terminal `FAILED`. `TEST` and similar categories never enter `RETRYING`. Lease expiry recovery stays on the immediate `QUEUED` path so abandoned work is not delayed by backoff.
 
 See [Architecture: Scheduling and claiming](../architecture.md#scheduling-and-claiming) and [ADR 0003](../adr/0003-postgres-as-job-queue.md).

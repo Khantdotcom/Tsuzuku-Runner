@@ -519,6 +519,51 @@ func (q *Queries) ListTransitions(ctx context.Context, jobID uuid.UUID) ([]State
 	return items, nil
 }
 
+const lockDueRetryingJobs = `-- name: LockDueRetryingJobs :many
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority
+FROM jobs
+WHERE state = 'RETRYING'
+  AND (scheduled_at IS NULL OR scheduled_at <= now())
+ORDER BY priority DESC, created_at, number
+LIMIT $1
+FOR UPDATE SKIP LOCKED
+`
+
+// LockDueRetryingJobs returns RETRYING jobs whose backoff has elapsed,
+// locking them so the scheduler can promote them to QUEUED once.
+func (q *Queries) LockDueRetryingJobs(ctx context.Context, rowLimit int32) ([]Job, error) {
+	rows, err := q.db.Query(ctx, lockDueRetryingJobs, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Job{}
+	for rows.Next() {
+		var i Job
+		if err := rows.Scan(
+			&i.ID,
+			&i.Number,
+			&i.WorkloadID,
+			&i.State,
+			&i.AssignedWorkerID,
+			&i.ScheduledAt,
+			&i.CancelRequestedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Priority,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockNextAssignedJob = `-- name: LockNextAssignedJob :one
 SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority FROM jobs
 WHERE assigned_worker_id = $1 AND state = 'SCHEDULED'
@@ -697,9 +742,13 @@ SET state              = $1,
         WHEN $4::boolean THEN NULL
         ELSE cancel_requested_at
     END,
-    started_at         = CASE WHEN $5::boolean THEN coalesce(started_at, now()) ELSE started_at END,
-    finished_at        = CASE WHEN $6::boolean THEN now() ELSE finished_at END
-WHERE id = $7 AND state = $8
+    scheduled_at       = CASE
+        WHEN $5::boolean THEN $6::timestamptz
+        ELSE scheduled_at
+    END,
+    started_at         = CASE WHEN $7::boolean THEN coalesce(started_at, now()) ELSE started_at END,
+    finished_at        = CASE WHEN $8::boolean THEN now() ELSE finished_at END
+WHERE id = $9 AND state = $10
 RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority
 `
 
@@ -708,6 +757,8 @@ type TransitionJobParams struct {
 	ClearWorker    bool
 	AssignWorkerID *uuid.UUID
 	ClearCancel    bool
+	SetScheduledAt bool
+	ScheduledAt    *time.Time
 	MarkStarted    bool
 	MarkFinished   bool
 	ID             uuid.UUID
@@ -719,13 +770,16 @@ type TransitionJobParams struct {
 // started_at keeps the first start; finished_at is set on every final state.
 // clear_worker drops the assignment (recovery requeue); otherwise a non-NULL
 // assign_worker_id sets the assigned worker. clear_cancel drops a pending
-// cancel when the job is put back on the queue.
+// cancel when the job is put back on the queue. set_scheduled_at writes
+// scheduled_at (NULL clears it) for retry backoff and promotion.
 func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (Job, error) {
 	row := q.db.QueryRow(ctx, transitionJob,
 		arg.ToState,
 		arg.ClearWorker,
 		arg.AssignWorkerID,
 		arg.ClearCancel,
+		arg.SetScheduledAt,
+		arg.ScheduledAt,
 		arg.MarkStarted,
 		arg.MarkFinished,
 		arg.ID,

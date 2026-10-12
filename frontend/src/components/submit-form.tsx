@@ -44,6 +44,14 @@ export function SubmitForm() {
     if (verification) {
       body.verification = { command: verification };
     }
+    const executorKind = String(fd.get("executor_kind") ?? "command").trim();
+    const executorPrompt = String(fd.get("executor_prompt") ?? "").trim();
+    if (executorKind === "ai" || executorPrompt) {
+      body.executor = {
+        kind: executorKind === "ai" ? "ai" : "command",
+        prompt: executorPrompt || undefined,
+      };
+    }
     if (mode === "schedule") {
       const when = String(fd.get("scheduled_at") ?? "");
       if (!when) {
@@ -95,7 +103,27 @@ export function SubmitForm() {
           label="Acceptance criteria"
           name="acceptance_criteria"
           as="textarea"
-          hint="One per line. Stored with the workload; not evaluated yet."
+          hint="One per line. Used as the AI prompt when executor is ai and no prompt is set."
+        />
+        <label className="block text-sm">
+          <span className="font-medium">Executor</span>
+          <select
+            name="executor_kind"
+            defaultValue="command"
+            className="mt-1 w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none ring-ring focus:ring-2"
+          >
+            <option value="command">Command (shell)</option>
+            <option value="ai">AI CLI (requires verification)</option>
+          </select>
+          <span className="mt-1 block text-xs text-muted-foreground">
+            AI runs a worker-configured CLI template; verification still decides the outcome.
+          </span>
+        </label>
+        <Field
+          label="AI prompt"
+          name="executor_prompt"
+          as="textarea"
+          placeholder="Optional override when executor is AI"
         />
       </fieldset>
 

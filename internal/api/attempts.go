@@ -210,21 +210,45 @@ func validateFinish(req workerapi.FinishRequest) error {
 	case req.Stage != "" && !validStages[req.Stage]:
 		return errors.New("stage must be workspace, image, checkout, execute, verify, or shutdown")
 	}
-	v := req.Verification
-	if v == nil {
-		return nil
+	results := req.Verifications
+	if req.Verification != nil {
+		results = append([]workerapi.VerificationResult{*req.Verification}, results...)
 	}
-	if err := validateRuntime(v.Runtime, workerapi.RoleVerify); err != nil {
-		return fmt.Errorf("verification.%w", err)
+	if len(results) > workerapi.MaxVerifications {
+		return fmt.Errorf("at most %d verification results are allowed", workerapi.MaxVerifications)
 	}
-	if err := validateStep("verification.result", v.Result); err != nil {
-		return err
+	for i, v := range results {
+		prefix := fmt.Sprintf("verifications[%d]", i)
+		if req.Verification != nil && i == 0 && len(req.Verifications) == 0 {
+			prefix = "verification"
+		}
+		if err := validateRuntime(v.Runtime, workerapi.RoleVerify); err != nil {
+			return fmt.Errorf("%s.%w", prefix, err)
+		}
+		if err := validateStep(prefix+".result", v.Result); err != nil {
+			return err
+		}
+		switch {
+		case v.Command == "" || len(v.Command) > maxCommandLen:
+			return fmt.Errorf("%s.command must be 1-%d bytes", prefix, maxCommandLen)
+		case len(v.OutputTail) > maxOutputTail:
+			return fmt.Errorf("%s.output_tail must be at most %d bytes", prefix, maxOutputTail)
+		case len(v.Name) > 64:
+			return fmt.Errorf("%s.name must be at most 64 characters", prefix)
+		}
 	}
-	switch {
-	case v.Command == "" || len(v.Command) > maxCommandLen:
-		return fmt.Errorf("verification.command must be 1-%d bytes", maxCommandLen)
-	case len(v.OutputTail) > maxOutputTail:
-		return fmt.Errorf("verification.output_tail must be at most %d bytes", maxOutputTail)
+	if in := req.Integrity; in != nil {
+		if len(in.Diff) > workerapi.MaxIntegrityDiffBytes {
+			return fmt.Errorf("integrity.diff must be at most %d bytes", workerapi.MaxIntegrityDiffBytes)
+		}
+		if len(in.Findings) > workerapi.MaxIntegrityFindings {
+			return fmt.Errorf("integrity.findings must have at most %d items", workerapi.MaxIntegrityFindings)
+		}
+		for i, f := range in.Findings {
+			if f.Rule == "" || len(f.Rule) > 64 || len(f.Detail) > 2000 {
+				return fmt.Errorf("integrity.findings[%d] rule/detail is invalid", i)
+			}
+		}
 	}
 	return nil
 }

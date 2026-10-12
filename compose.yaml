@@ -111,6 +111,32 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # Optional: docker compose --profile obs up
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      server:
+        condition: service_started
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:12.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: tsuzuku
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/observability/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "127.0.0.1:3001:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+
 volumes:
   pgdata:
   artifacts:

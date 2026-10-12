@@ -80,8 +80,13 @@ func (f *fakeRuntime) Run(ctx context.Context, _ runtime.Workspace, step runtime
 	block, runErr, code, timedOut := f.blockRun, f.runErr, f.exitCode, f.timedOut
 	out, errOut := f.stdout, f.stderr
 	if step.Role == workerapi.RoleVerify {
-		block, runErr, code, timedOut = false, f.verifyErr, f.verifyExit, false
-		out, errOut = f.verifyOutput, ""
+		if strings.Contains(step.Command, "git diff") {
+			block, runErr, code, timedOut = false, nil, 0, false
+			out, errOut = "", ""
+		} else {
+			block, runErr, code, timedOut = false, f.verifyErr, f.verifyExit, false
+			out, errOut = f.verifyOutput, ""
+		}
 	}
 	f.mu.Unlock()
 
@@ -229,12 +234,13 @@ func TestExecutorRunsAttempt(t *testing.T) {
 	if rt.repo != claim.Spec.Repository || rt.rev != "main" {
 		t.Errorf("checked out %s@%s", rt.repo, rt.rev)
 	}
-	want := runtime.Step{
+	wantExec := runtime.Step{
 		Role: workerapi.RoleExecute, Image: "golang:1.27", Command: "go test ./...",
 		CPUMillis: 1500, MemoryMB: 768, Network: true, Timeout: 90 * time.Second,
 	}
-	if len(rt.steps) != 1 || rt.steps[0] != want {
-		t.Errorf("steps = %+v, want %+v", rt.steps, want)
+	if len(rt.steps) != 2 || rt.steps[0] != wantExec || rt.steps[1].Role != workerapi.RoleVerify ||
+		!strings.Contains(rt.steps[1].Command, "git diff") {
+		t.Errorf("steps = %+v, want execute then integrity scan", rt.steps)
 	}
 
 	if len(rep.executing) != 1 {
@@ -253,8 +259,9 @@ func TestExecutorRunsAttempt(t *testing.T) {
 		v.Runtime.CPUMillis != 1500 || !v.Runtime.Network {
 		t.Errorf("verifying = %+v", v)
 	}
-	if len(rep.finished) != 1 || rep.finished[0] != (workerapi.FinishRequest{}) {
-		t.Errorf("finish = %+v, want one empty finish so the server decides", rep.finished)
+	if len(rep.finished) != 1 || rep.finished[0].Error != "" || rep.finished[0].Cancelled ||
+		len(rep.finished[0].Verifications) != 0 || rep.finished[0].Integrity == nil {
+		t.Errorf("finish = %+v, want integrity-only finish so the server decides", rep.finished)
 	}
 	if len(rt.removed) != 1 {
 		t.Errorf("workspaces removed = %d, want 1", len(rt.removed))
@@ -279,19 +286,19 @@ func TestExecutorRunsVerification(t *testing.T) {
 
 	newTestExecutor(rt, rep).Run(t.Context(), uuid.New(), verifiedClaim("make lint"))
 
-	if len(rt.steps) != 2 {
-		t.Fatalf("steps = %+v, want execute then verify", rt.steps)
+	if len(rt.steps) != 3 {
+		t.Fatalf("steps = %+v, want execute, integrity, verify", rt.steps)
 	}
-	vs := rt.steps[1]
+	vs := rt.steps[2]
 	if vs.Role != workerapi.RoleVerify || vs.Command != "make lint" || vs.Image != "golang:1.27" || vs.Timeout != 90*time.Second {
 		t.Errorf("verify step = %+v", vs)
 	}
-	if len(rep.finished) != 1 || rep.finished[0].Verification == nil {
-		t.Fatalf("finish = %+v, want a verification result", rep.finished)
+	if len(rep.finished) != 1 || len(rep.finished[0].Verifications) != 1 || rep.finished[0].Integrity == nil {
+		t.Fatalf("finish = %+v, want verification + integrity", rep.finished)
 	}
-	v := rep.finished[0].Verification
-	if v.Command != "make lint" || v.Result.ExitCode != 1 || v.Result.TimedOut || v.Runtime.Role != workerapi.RoleVerify ||
-		v.OutputTail != "FAIL: lint" {
+	v := rep.finished[0].Verifications[0]
+	if v.Name != "verification" || v.Command != "make lint" || v.Result.ExitCode != 1 || v.Result.TimedOut ||
+		v.Runtime.Role != workerapi.RoleVerify || v.OutputTail != "FAIL: lint" {
 		t.Errorf("verification = %+v", v)
 	}
 	if got := rep.output(workerapi.StreamStdout); strings.Contains(got, "FAIL") {
@@ -308,7 +315,7 @@ func TestExecutorSkipsVerificationAfterFailedCommand(t *testing.T) {
 	if len(rt.steps) != 1 {
 		t.Errorf("steps = %+v, want only the command", rt.steps)
 	}
-	if len(rep.finished) != 1 || rep.finished[0] != (workerapi.FinishRequest{}) {
+	if len(rep.finished) != 1 || len(rep.finished[0].Verifications) != 0 || rep.finished[0].Error != "" || rep.finished[0].Cancelled {
 		t.Errorf("finish = %+v, want an empty finish", rep.finished)
 	}
 }
@@ -393,7 +400,7 @@ func TestExecutorReportsInfrastructureFailures(t *testing.T) {
 			workerapi.StageCheckout, workerapi.RolePrepare, 1, 0,
 		},
 		{"run", &fakeRuntime{runErr: boom}, "run command: boom", workerapi.StageExecute, workerapi.RoleExecute, 1, 0},
-		{"verify", &fakeRuntime{verifyErr: boom}, "run verification: boom", workerapi.StageVerify, workerapi.RoleVerify, 1, 1},
+		{"verify", &fakeRuntime{verifyErr: boom}, "run verification verification: boom", workerapi.StageVerify, workerapi.RoleVerify, 1, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

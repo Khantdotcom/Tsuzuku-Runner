@@ -56,7 +56,7 @@ Every artifact is recorded with its size and **SHA-256** hash. The hash proves a
 
 **The idea.** Commit the decision first, then do the side effect as **best effort**: if it fails, log it, and make sure the system is still correct without it. Give the side effect its own deadline, detached from the request that triggered it, so a client disconnecting does not abort it halfway.
 
-**In this project.** After an attempt's outcome commits, the server builds `stdout.log` and `stderr.log` from the stored chunks, using `context.WithoutCancel` and a 30-second timeout. If that fails, the outcome stands and the chunks are still readable from the logs endpoint. Both the file write and the metadata insert are idempotent, so doing it again is safe.
+**In this project.** After an attempt's outcome commits, the server builds an **evidence bundle** under `jobs/<job>/attempts/<n>/`: `stdout.log`, `stderr.log`, plus JSON sidecars (`job.json`, `environment.json`, `commands.json`, `verification.json`, `resources.json`, `failure.json`) and optional `diff.patch` when the worker reported a workspace diff. Writes use `context.WithoutCancel` and a 30-second timeout. If that fails, the outcome stands and log chunks remain readable from the logs endpoint. `GET /api/v1/jobs/{id}/evidence/bundle` zips the latest attempt's files. Metadata inserts are idempotent on `(job, attempt, name)`.
 
 ## Verification independent of the executor
 
@@ -66,15 +66,15 @@ Every artifact is recorded with its size and **SHA-256** hash. The hash proves a
 
 **Combining statuses.** When several checks disagree, the more serious status wins: `ERROR` (the check itself could not run) beats `FAILED` (it ran and said no), which beats `PASSED`. A check that cannot apply is `SKIPPED` rather than failed. There is no point verifying a command that already failed.
 
-**In this project.** `job.judge` in `internal/job/outcome.go` turns the reported facts into checks and an outcome. It is a pure function with no database or network, so a table-driven unit test covers every combination.
+**In this project.** After a successful command the worker scans the workspace diff for deleted tests, removed assertions, added skips, and acceptance-path edits (`worker.ScanDiff`), then runs each `verification.command` / named `verification.checks` entry in its own verify container. `job.judge` turns exit code, those results, acceptance criteria (substring match in verify output), and integrity findings into checks and an outcome. It is a pure function with no database or network. Acceptance misses use category `REQUIREMENT` (job becomes `BLOCKED`); integrity hits use `SECURITY` (terminal `FAILED`). Heuristics are intentionally simple—real policy belongs in verification commands.
 
 ## Failure classification
 
 **The problem.** "Job failed" is not actionable. Was it the user's code, the network, a missing image, or our own bug? Each needs a different response: fix the code, retry, or page someone.
 
-**The idea.** Record every failure with a **category** from a fixed list, plus a message and structured details. Categories make failures searchable and countable, and later drive automatic decisions such as retrying infrastructure failures but not test failures.
+**The idea.** Record every failure with a **category** from a fixed list, plus a message and structured details. Categories make failures searchable and countable, and drive automatic decisions: retry infrastructure blips, block requirement gaps, fail test and code faults without wasting another attempt.
 
-**In this project.** The worker tags early failures with the *stage* that failed (`image`, `checkout`, `execute`, ...). `job.stageCategory` maps stages to categories, so the mapping lives in one tested place on the server.
+**In this project.** The worker tags early failures with the *stage* that failed (`image`, `checkout`, `execute`, ...). `job.stageCategory` maps stages to categories; `job.ActionFor` turns a category into retry, block, or fail. Verification and exit-code outcomes use `TEST` (no auto-retry). `REQUIREMENT` ends the job as `BLOCKED`. Retryable categories put the job in `RETRYING` with exponential backoff (`TSUZUKU_RETRY_BACKOFF_BASE` / `CAP`, up to `TSUZUKU_JOB_MAX_ATTEMPTS`). Lease recovery still requeues immediately to `QUEUED` without backoff. See [Architecture](../architecture.md#failure-policy-and-retries) and [Job queue](job-queue.md#retries-with-backoff).
 
 ## Cooperative cancellation
 

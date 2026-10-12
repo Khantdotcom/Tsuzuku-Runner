@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/metrics"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 )
@@ -34,6 +35,8 @@ type Options struct {
 	BatchSize int
 	// Notifier, if set, is broadcast after a round places jobs.
 	Notifier *Notifier
+	// Metrics, if set, records tick duration and placements.
+	Metrics *metrics.Registry
 }
 
 // Scheduler places queued jobs on workers.
@@ -72,6 +75,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 // placed. It places nothing when another scheduler holds the lock. Before
 // placement it recovers abandoned SCHEDULED jobs and expired mid-run leases.
 func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
+	start := time.Now()
 	var placed []Assignment
 	err := store.WithTx(ctx, s.pool, func(q *db.Queries) error {
 		locked, err := q.TryLockScheduler(ctx, lockKey)
@@ -158,6 +162,12 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 	if err != nil {
 		return nil, err
 	}
+	if s.opts.Metrics != nil {
+		s.opts.Metrics.SchedulerTick.Observe(time.Since(start).Seconds())
+		if n := len(placed); n > 0 {
+			s.opts.Metrics.Placements.Add(float64(n))
+		}
+	}
 
 	if len(placed) > 0 && s.opts.Notifier != nil {
 		s.opts.Notifier.Broadcast()
@@ -168,9 +178,9 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 	return placed, nil
 }
 
-// recover returns abandoned SCHEDULED jobs to QUEUED and fails mid-run
-// attempts whose leases expired, then requeues those jobs. Callers must hold
-// the scheduler advisory lock.
+// recover returns abandoned SCHEDULED jobs to QUEUED, fails mid-run attempts
+// whose leases expired (then requeues those jobs), and promotes due RETRYING
+// jobs to QUEUED. Callers must hold the scheduler advisory lock.
 func (s *Scheduler) recover(ctx context.Context, q *db.Queries) error {
 	limit := int32(s.opts.BatchSize) //nolint:gosec // BatchSize is a small positive cap
 
@@ -198,6 +208,17 @@ func (s *Scheduler) recover(ctx context.Context, q *db.Queries) error {
 		}
 		s.logger.InfoContext(ctx, "requeued job after expired lease",
 			"job_id", row.JobID, "attempt_id", row.AttemptID, "worker_id", row.WorkerID)
+	}
+
+	due, err := q.LockDueRetryingJobs(ctx, limit)
+	if err != nil {
+		return fmt.Errorf("lock due retrying jobs: %w", err)
+	}
+	for _, j := range due {
+		if err := job.PromoteRetrying(ctx, q, j.ID); err != nil {
+			return fmt.Errorf("promote retrying job %s: %w", j.ID, err)
+		}
+		s.logger.InfoContext(ctx, "promoted retrying job to queued", "job_id", j.ID, "job_number", j.Number)
 	}
 	return nil
 }

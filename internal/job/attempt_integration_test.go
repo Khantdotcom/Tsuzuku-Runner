@@ -160,8 +160,8 @@ func TestAttemptTimeoutFailsWithoutVerification(t *testing.T) {
 	if err != nil || verify {
 		t.Fatalf("Verifying: verify %v, err %v; want the job ended without verification", verify, err)
 	}
-	if j := jobState(t, pool, c.Job.ID); j.State != string(job.Failed) {
-		t.Errorf("state = %s, want FAILED", j.State)
+	if j := jobState(t, pool, c.Job.ID); j.State != string(job.Retrying) {
+		t.Errorf("state = %s, want RETRYING", j.State)
 	}
 	if got := lastReason(t, pool, c.Job.ID); got != "timed out after 2s" {
 		t.Errorf("reason = %q", got)
@@ -179,12 +179,14 @@ func TestAttemptErrorFromAnyRunningState(t *testing.T) {
 	rt := runtimeFor(workerapi.RolePrepare)
 	reason := "check out repository: checkout failed: git exited with code 128: " + strings.Repeat("é", 1500)
 
-	if err := svc.Finish(t.Context(), w, c.Attempt.ID, workerapi.FinishRequest{Error: reason, Runtime: &rt}); err != nil {
+	if err := svc.Finish(t.Context(), w, c.Attempt.ID, workerapi.FinishRequest{
+		Error: reason, Stage: workerapi.StageCheckout, Runtime: &rt,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	j := jobState(t, pool, c.Job.ID)
-	if j.State != string(job.Failed) || j.FinishedAt == nil {
-		t.Errorf("job = %s, want FAILED from PREPARING", j.State)
+	if j.State != string(job.Retrying) || j.FinishedAt != nil {
+		t.Errorf("job = %s finished=%v, want RETRYING from PREPARING", j.State, j.FinishedAt)
 	}
 	a := attemptRow(t, pool, c.Job.ID)
 	if a.Status != job.AttemptFailed || a.Error == nil || !strings.HasPrefix(*a.Error, "check out repository") {

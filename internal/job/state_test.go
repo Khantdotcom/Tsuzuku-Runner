@@ -13,14 +13,23 @@ func TestTransitionTable(t *testing.T) {
 		{Preparing, Failed}:    true,
 		{Preparing, Cancelled}: true,
 		{Preparing, Queued}:    true,
+		{Preparing, Retrying}:  true,
+		{Preparing, Blocked}:   true,
 		{Executing, Verifying}: true,
 		{Executing, Failed}:    true,
 		{Executing, Cancelled}: true,
 		{Executing, Queued}:    true,
+		{Executing, Retrying}:  true,
+		{Executing, Blocked}:   true,
 		{Verifying, Completed}: true,
 		{Verifying, Failed}:    true,
 		{Verifying, Cancelled}: true,
 		{Verifying, Queued}:    true,
+		{Verifying, Retrying}:  true,
+		{Verifying, Blocked}:   true,
+		{Retrying, Queued}:     true,
+		{Retrying, Failed}:     true,
+		{Retrying, Cancelled}:  true,
 	}
 	for _, from := range States {
 		for _, to := range States {
@@ -64,7 +73,7 @@ func TestStateHelpers(t *testing.T) {
 	if State("DONE").Valid() || State("queued").Valid() {
 		t.Error("unknown or lower-case states must not be valid")
 	}
-	terminal := map[State]bool{Completed: true, Failed: true, Cancelled: true}
+	terminal := map[State]bool{Completed: true, Failed: true, Cancelled: true, Blocked: true}
 	for _, s := range States {
 		if s.Terminal() != terminal[s] {
 			t.Errorf("%s.Terminal() = %v", s, s.Terminal())

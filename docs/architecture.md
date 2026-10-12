@@ -122,20 +122,29 @@ stateDiagram-v2
     PREPARING --> FAILED
     EXECUTING --> FAILED
     VERIFYING --> FAILED
+    PREPARING --> RETRYING: retryable failure
+    EXECUTING --> RETRYING: retryable failure
+    VERIFYING --> RETRYING: retryable failure
+    PREPARING --> BLOCKED: requirement failure
+    EXECUTING --> BLOCKED: requirement failure
+    VERIFYING --> BLOCKED: requirement failure
+    RETRYING --> QUEUED: backoff elapsed
     PREPARING --> QUEUED: lease expired
     EXECUTING --> QUEUED: lease expired
     VERIFYING --> QUEUED: lease expired
     QUEUED --> CANCELLED
     SCHEDULED --> CANCELLED
+    RETRYING --> CANCELLED
     PREPARING --> CANCELLED
     EXECUTING --> CANCELLED
     VERIFYING --> CANCELLED
     COMPLETED --> [*]
     FAILED --> [*]
+    BLOCKED --> [*]
     CANCELLED --> [*]
 ```
 
-`internal/job` owns the table of legal transitions; every change goes through `job.Transition`, which applies a compare-and-set update and records the history row and a timeline event in the same transaction ([ADR 0004](adr/0004-job-state-machine.md)). Recovery edges back to `QUEUED` clear the assignment (and any pending cancel) so the job can be placed again. `RETRYING`, `REPAIRING`, and `BLOCKED` exist in the schema but have no edges until the milestones that use them.
+`internal/job` owns the table of legal transitions; every change goes through `job.Transition`, which applies a compare-and-set update and records the history row and a timeline event in the same transaction ([ADR 0004](adr/0004-job-state-machine.md)). Recovery edges back to `QUEUED` clear the assignment (and any pending cancel) so the job can be placed again. Retryable attempt failures move the job to `RETRYING` with `scheduled_at` set to the next try; the scheduler promotes due `RETRYING` jobs to `QUEUED`. `REQUIREMENT` failures end as `BLOCKED`. `REPAIRING` remains unused until a later milestone.
 
 ## Scheduling and claiming
 
@@ -153,7 +162,7 @@ sequenceDiagram
     W->>A: POST /workers/{id}/claim?wait=25s
     Note over A,W: request held open
     loop every TSUZUKU_SCHEDULER_INTERVAL
-        S->>DB: advisory lock, recover abandoned/expired, online workers, oldest QUEUED jobs (SKIP LOCKED)
+        S->>DB: advisory lock, recover abandoned/expired, promote due RETRYING, place QUEUED
         S->>DB: QUEUED to SCHEDULED, assigned_worker_id set
     end
     S-->>A: wake waiting claims
@@ -164,7 +173,7 @@ sequenceDiagram
 **Scheduler.** One loop inside `server` runs a round every `TSUZUKU_SCHEDULER_INTERVAL` (1s by default). Each round is one transaction:
 
 1. Take the advisory lock with `pg_try_advisory_xact_lock`. If another server replica holds it, skip the round. The lock is released at commit, so a crashed replica never leaves it held.
-2. Recover abandoned work under that lock (see below), so freed capacity is visible to placement in the same round.
+2. Recover abandoned work under that lock (see below), and promote due `RETRYING` jobs to `QUEUED`, so freed capacity and retries are visible to placement in the same round.
 3. Load online workers (same database-clock rule as `/workers`) with unfinished job counts and reserved CPU/RAM from their assigned workloads (`SCHEDULED` through `VERIFYING`).
 4. Lock up to 100 placeable `QUEUED` jobs (`scheduled_at` empty or past) with `FOR UPDATE SKIP LOCKED`, ordered by `priority` (higher first), then age.
 5. Place each job on the worker with the fewest unfinished jobs that still has a free slot and enough remaining CPU and memory; ties go to the earliest-registered worker. Jobs that fit nowhere are skipped so they do not block smaller jobs behind them.
@@ -179,9 +188,20 @@ With `?wait=25s` (at most 30s) the request is held open until a job is assigned.
 **Leases and recovery.** Each heartbeat renews every still-valid lease the worker holds by another `TSUZUKU_LEASE_TTL`. Ending an attempt (success, failure, or cancel) releases its lease. Under the scheduler lock, each round also:
 
 - moves `SCHEDULED` jobs whose assigned worker is offline (`last_heartbeat_at` older than `TSUZUKU_WORKER_STALE_AFTER`) back to `QUEUED` and clears the assignment;
-- for mid-run jobs (`PREPARING`, `EXECUTING`, `VERIFYING`) whose lease has expired: finishes the attempt as `FAILED` with category `INFRASTRUCTURE`, releases the lease, and requeues the job to `QUEUED` (clearing assignment and any pending cancel).
+- for mid-run jobs (`PREPARING`, `EXECUTING`, `VERIFYING`) whose lease has expired: finishes the attempt as `FAILED` with category `INFRASTRUCTURE`, releases the lease, and requeues the job to `QUEUED` immediately (clearing assignment and any pending cancel; no retry backoff);
+- promotes `RETRYING` jobs whose `scheduled_at` is empty or past back to `QUEUED` (clearing `scheduled_at`) so they can be placed again.
 
 A late report from the old attempt is rejected because the attempt is no longer `RUNNING` (fencing via `LockAttempt`). Recovery events appear on the job timeline like any other state change.
+
+**Failure policy and retries.** When an attempt ends with a failure category, `job.applyPolicy` chooses the job's next state:
+
+| Action | Categories (examples) | Job state |
+| ------ | --------------------- | --------- |
+| Retry  | `INFRASTRUCTURE`, `NETWORK`, `TIMEOUT`, `RESOURCE`, `ENVIRONMENT` | `RETRYING` if attempts remain (`TSUZUKU_JOB_MAX_ATTEMPTS`, default 3), else `FAILED` |
+| Block  | `REQUIREMENT` | `BLOCKED` (terminal; needs a human or a new submission) |
+| Fail   | `TEST`, `CODE`, `SECURITY`, `DEPENDENCY`, `EXECUTOR`, `UNKNOWN` | `FAILED` |
+
+A retry finishes the attempt as `FAILED`, records the `failures` row, clears the worker, and sets `scheduled_at` to now plus exponential backoff (`TSUZUKU_RETRY_BACKOFF_BASE` 1s, doubling up to `TSUZUKU_RETRY_BACKOFF_CAP` 5m). The attempt counter is not reset: each claim creates the next `job_attempts` row. Cancelling a `RETRYING` job is immediate (like `QUEUED`).
 
 ## Running a job
 
@@ -217,14 +237,16 @@ sequenceDiagram
 
 ## Verification and outcome
 
-When the command exits `0` and the workload has a `verification.command`, the worker runs it as a second container (role `verify`) in the same workspace, with the same image, limits, and timeout. It reports the exit code, whether it timed out, and the last 4 KB of its output. Verification output is kept on the check, not in the job's logs.
+When the command exits `0`, the worker scans the workspace `git diff` for suspicious test or acceptance edits, then runs each verification step as its own `verify` container (legacy `verification.command` plus up to five named `verification.checks`). Each reports exit code, timeout, and a 4 KB output tail. Output stays on the check, not in job logs.
 
 The server turns the reported facts into a verification run with one check per rule, then the job's outcome:
 
-| Check          | Kind        | Passes when                    | Otherwise                                                    |
-| -------------- | ----------- | ------------------------------ | ------------------------------------------------------------ |
-| `exit_code`    | `exit_code` | the command exited `0`         | `FAILED`; `ERROR` if no exit code was recorded               |
-| `verification` | `command`   | the verification command exits `0` | `FAILED` on a non-zero exit or timeout; `SKIPPED` if the command failed; `ERROR` if the worker sent no result |
+| Check          | Kind          | Passes when                                      | Otherwise                                                                 |
+| -------------- | ------------- | ------------------------------------------------ | ------------------------------------------------------------------------- |
+| `exit_code`    | `exit_code`   | the command exited `0`                           | `FAILED`; `ERROR` if no exit code was recorded                            |
+| named / `verification` | `command` | that verify container exits `0`                | `FAILED` on non-zero or timeout; `SKIPPED` if command failed; `ERROR` if missing |
+| `acceptance[i]` | `acceptance` | criterion text appears in combined verify output | miss → category `REQUIREMENT` → job `BLOCKED`                             |
+| `integrity` / `integrity[i]` | `integrity` | no heuristic findings in the workspace diff | findings → category `SECURITY` → job `FAILED` (no retry)                |
 
 The run is `PASSED` only if every check passed; any `ERROR` makes it `ERROR`, otherwise any failure makes it `FAILED`. The job is `COMPLETED` only when the run passed. Acceptance criteria are stored with the workload but are not evaluated yet.
 
@@ -359,4 +381,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestone 0 (foundation) through Milestone 3 (leases and recovery) are complete. Milestone 4 (resource-aware scheduler) is complete: placement respects CPU, memory, and slots with job priority and skip-unfit backpressure; `GET /api/v1/queue` and reserved capacity on workers; Queue page and priority on submit.
+Milestones 0–9 for the MVP demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, and an AI executor seam (`executor.kind` + CLI template) that still goes through independent verification.

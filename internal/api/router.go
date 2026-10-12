@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/metrics"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
@@ -38,6 +39,8 @@ type Config struct {
 	LeaseTTL time.Duration
 	// WorkloadLimits caps the resources a submitted workload may request.
 	WorkloadLimits workload.Limits
+	// Metrics, if set, records HTTP and job counters.
+	Metrics *metrics.Registry
 }
 
 type server struct {
@@ -52,6 +55,7 @@ type server struct {
 	workerStaleAfter time.Duration
 	leaseTTL         time.Duration
 	workloadLimits   workload.Limits
+	metrics          *metrics.Registry
 }
 
 // NewRouter builds the HTTP handler for the API server.
@@ -68,6 +72,7 @@ func NewRouter(cfg Config) http.Handler {
 		workerStaleAfter: cfg.WorkerStaleAfter,
 		leaseTTL:         cfg.LeaseTTL,
 		workloadLimits:   cfg.WorkloadLimits,
+		metrics:          cfg.Metrics,
 	}
 
 	r := chi.NewRouter()
@@ -75,6 +80,9 @@ func NewRouter(cfg Config) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(requestLogger(cfg.Logger))
 	r.Use(middleware.Recoverer)
+	if cfg.Metrics != nil {
+		r.Use(cfg.Metrics.Middleware)
+	}
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusNotFound, "")
@@ -86,6 +94,7 @@ func NewRouter(cfg Config) http.Handler {
 	r.Get("/healthz", handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 	r.Get("/openapi.yaml", handleOpenAPI)
+	r.Handle("/metrics", metrics.Handler())
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/workers", s.handleListWorkers)
@@ -102,6 +111,7 @@ func NewRouter(cfg Config) http.Handler {
 		r.Get("/jobs/{id}/logs/stream", s.handleStreamLogs)
 		r.Post("/jobs/{id}/cancel", s.handleCancelJob)
 		r.Get("/jobs/{id}/evidence", s.handleGetEvidence)
+		r.Get("/jobs/{id}/evidence/bundle", s.handleDownloadEvidenceBundle)
 		r.Get("/jobs/{id}/artifacts", s.handleListArtifacts)
 		r.Get("/jobs/{id}/artifacts/{artifactID}", s.handleDownloadArtifact)
 

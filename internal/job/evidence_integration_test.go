@@ -143,11 +143,15 @@ func TestFinishStoresLogArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{job.ArtifactStdout: "line 1\nline 2\n", job.ArtifactStderr: "warn\n"}
-	if len(e.Artifacts) != 2 {
-		t.Fatalf("artifacts = %+v", e.Artifacts)
-	}
+	byName := map[string]db.Artifact{}
 	for _, a := range e.Artifacts {
-		content := want[a.Name]
+		byName[a.Name] = a
+	}
+	for name, content := range want {
+		a, ok := byName[name]
+		if !ok {
+			t.Fatalf("missing artifact %s in %+v", name, e.Artifacts)
+		}
 		sum := sha256.Sum256([]byte(content))
 		if a.SizeBytes != int64(len(content)) || a.Sha256 != hex.EncodeToString(sum[:]) || a.AttemptID == nil || *a.AttemptID != c.Attempt.ID {
 			t.Errorf("artifact %s = %+v", a.Name, a)
@@ -162,12 +166,21 @@ func TestFinishStoresLogArtifacts(t *testing.T) {
 			t.Errorf("%s content = %q, want %q", a.Name, data, content)
 		}
 	}
+	for _, name := range []string{job.ArtifactJob, job.ArtifactEnvironment, job.ArtifactCommands, job.ArtifactVerification, job.ArtifactResources, job.ArtifactFailure} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("missing bundle file %s", name)
+		}
+	}
 	if _, _, err := svc.OpenArtifact(ctx, uuid.New(), e.Artifacts[0].ID); !errors.Is(err, job.ErrArtifactNotFound) {
 		t.Errorf("artifact under another job: err = %v, want ErrArtifactNotFound", err)
 	}
 
-	if len(e.Verifications) != 1 || e.Verifications[0].Run.Status != job.CheckPassed || len(e.Verifications[0].Checks) != 1 {
+	if len(e.Verifications) != 1 || e.Verifications[0].Run.Status != job.CheckPassed {
 		t.Errorf("verifications = %+v", e.Verifications)
+	}
+	checks := e.Verifications[0].Checks
+	if len(checks) < 1 || checks[0].Status != job.CheckPassed {
+		t.Errorf("checks = %+v, want exit_code PASSED", checks)
 	}
 	if len(e.Failures) != 0 {
 		t.Errorf("failures = %+v, want none for a passing job", e.Failures)
@@ -207,7 +220,7 @@ func TestFinishWithFailedVerification(t *testing.T) {
 		t.Fatalf("verifications = %+v", e.Verifications)
 	}
 	checks := e.Verifications[0].Checks
-	if len(checks) != 2 || checks[0].Status != job.CheckPassed || checks[1].Status != job.CheckFailed ||
+	if len(checks) < 2 || checks[0].Status != job.CheckPassed || checks[1].Status != job.CheckFailed ||
 		checks[1].Output != "lint: 3 problems" || *checks[1].Command != "make lint" || *checks[1].ExitCode != 1 {
 		t.Errorf("checks = %+v", checks)
 	}
@@ -228,6 +241,9 @@ func TestFailuresAreClassified(t *testing.T) {
 	if err := svc.Finish(ctx, w, c.Attempt.ID, workerapi.FinishRequest{Error: "pull image: not found", Stage: workerapi.StageImage}); err != nil {
 		t.Fatal(err)
 	}
+	if j := jobState(t, pool, c.Job.ID); j.State != string(job.Retrying) {
+		t.Errorf("environment failure state = %s, want RETRYING", j.State)
+	}
 	failures, err := db.New(pool).ListFailures(ctx, c.Job.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +260,9 @@ func TestFailuresAreClassified(t *testing.T) {
 	}
 	if _, err := svc.Verifying(ctx, w, c.Attempt.ID, executed(137, true)); err != nil {
 		t.Fatal(err)
+	}
+	if j := jobState(t, pool, c.Job.ID); j.State != string(job.Retrying) {
+		t.Errorf("timeout state = %s, want RETRYING", j.State)
 	}
 	failures, err = db.New(pool).ListFailures(ctx, c.Job.ID)
 	if err != nil {

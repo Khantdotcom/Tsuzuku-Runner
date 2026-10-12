@@ -85,20 +85,6 @@ func (s *Service) AppendLogs(ctx context.Context, workerID, attemptID uuid.UUID,
 	return truncated, err
 }
 
-// archiveLogs stores a finished attempt's stdout and stderr as artifacts.
-// It is best effort: the job's outcome is already committed, and the output
-// remains readable from the log endpoint if storing fails.
-func (s *Service) archiveLogs(ctx context.Context, a db.JobAttempt) {
-	if s.artifacts == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), archiveTimeout)
-	defer cancel()
-	if err := s.storeLogs(ctx, a); err != nil {
-		s.logger.WarnContext(ctx, "store log artifacts", "job_id", a.JobID, "attempt_id", a.ID, "err", err)
-	}
-}
-
 func (s *Service) storeLogs(ctx context.Context, a db.JobAttempt) error {
 	chunks, err := s.q.ListAttemptLogChunks(ctx, a.ID)
 	if err != nil {
@@ -116,26 +102,8 @@ func (s *Service) storeLogs(ctx context.Context, a db.JobAttempt) error {
 		name string
 		data []byte
 	}{{ArtifactStdout, stdout.Bytes()}, {ArtifactStderr, stderr.Bytes()}} {
-		key := fmt.Sprintf("jobs/%s/attempts/%d/%s", a.JobID, a.AttemptNumber, f.name)
-		obj, err := s.artifacts.Put(ctx, key, f.data)
-		if err != nil {
+		if err := s.putArtifact(ctx, a, f.name, logContentType, f.data); err != nil {
 			return err
-		}
-		id, err := uuid.NewV7()
-		if err != nil {
-			return err
-		}
-		if _, err := s.q.CreateArtifact(ctx, db.CreateArtifactParams{
-			ID:          id,
-			JobID:       a.JobID,
-			AttemptID:   &a.ID,
-			Name:        f.name,
-			ContentType: logContentType,
-			StorageKey:  obj.Key,
-			SizeBytes:   obj.Size,
-			Sha256:      obj.SHA256,
-		}); err != nil {
-			return fmt.Errorf("record %s artifact: %w", f.name, err)
 		}
 	}
 	return nil

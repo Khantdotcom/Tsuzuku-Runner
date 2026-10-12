@@ -59,17 +59,23 @@ func run() error {
 	)
 
 	client := worker.NewClient(cfg.APIURL, cfg.Token)
-	executor := worker.NewExecutor(docker, client, logger, worker.ExecutorOptions{
+	commandExec := worker.NewExecutor(docker, client, logger, worker.ExecutorOptions{
 		Worker:          cfg.Name,
+		GitImage:        cfg.GitImage,
 		CheckoutTimeout: cfg.CheckoutTimeout,
 	})
+	aiExec := worker.NewAIExecutor(commandExec, logger, worker.AIExecutorOptions{
+		Enabled:         cfg.AIExecutorEnabled,
+		CommandTemplate: cfg.AIExecutorCommand,
+	})
+	runner := worker.SelectingRunner{Command: commandExec, AI: aiExec}
 	agent := worker.NewAgent(client, worker.HostProbe{}, logger, worker.Options{
 		Name:              cfg.Name,
 		Slots:             cfg.Slots,
 		HeartbeatInterval: cfg.HeartbeatInterval,
 		Version:           version(),
 		Jobs:              client,
-		Runner:            executor,
+		Runner:            runner,
 	})
 	err = agent.Run(ctx)
 	logger.Info("worker stopped")

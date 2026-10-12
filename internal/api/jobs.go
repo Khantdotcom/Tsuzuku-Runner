@@ -38,6 +38,7 @@ type JobService interface {
 	Evidence(ctx context.Context, jobID uuid.UUID) (job.Evidence, error)
 	Artifacts(ctx context.Context, jobID uuid.UUID) ([]db.Artifact, error)
 	OpenArtifact(ctx context.Context, jobID, artifactID uuid.UUID) (db.Artifact, io.ReadCloser, error)
+	BundleZip(ctx context.Context, jobID uuid.UUID, w io.Writer) (filename string, err error)
 }
 
 type jobView struct {
@@ -172,6 +173,7 @@ func (s *server) handleSubmitWorkload(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Idempotent-Replayed", "true")
 		status = http.StatusOK
 	} else {
+		s.metrics.ObserveJob("submit")
 		s.logger.InfoContext(r.Context(), "workload submitted",
 			"job_id", sub.Job.ID, "job_number", sub.Job.Number, "repository", spec.Repository)
 	}
@@ -184,6 +186,10 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, "job stats", err)
 		return
 	}
+	s.metrics.SetQueue(
+		float64(stats.Queued), float64(stats.Scheduled), float64(stats.Running),
+		float64(stats.Completed), float64(stats.Failed), float64(stats.Cancelled),
+	)
 	writeJSON(w, http.StatusOK, stats)
 }
 

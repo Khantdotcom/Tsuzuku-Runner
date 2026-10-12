@@ -15,6 +15,7 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
 
 // Attempt statuses, matching job_attempts.status.
@@ -93,12 +94,12 @@ func (s *Service) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, 
 		switch {
 		case j.CancelRequestedAt != nil:
 			ended = &a
-			return endAttempt(ctx, q, a, Executing, cancelledOnRequest())
+			return s.endAttempt(ctx, q, a, Executing, cancelledOnRequest())
 		case exec.TimedOut:
 			ended = &a
 			o := failed("timed out after "+durationText(exec.DurationMS), CategoryTimeout)
 			o.details = map[string]any{"duration_ms": exec.DurationMS}
-			return endAttempt(ctx, q, a, Executing, o)
+			return s.endAttempt(ctx, q, a, Executing, o)
 		}
 		_, err = Transition(ctx, q, Change{
 			JobID:     a.JobID,
@@ -113,7 +114,7 @@ func (s *Service) Verifying(ctx context.Context, workerID, attemptID uuid.UUID, 
 		return err
 	})
 	if err == nil && ended != nil {
-		s.archiveLogs(ctx, *ended)
+		s.archiveEvidence(ctx, *ended)
 	}
 	return verify, err
 }
@@ -135,13 +136,6 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 				return err
 			}
 		}
-		if v := req.Verification; v != nil {
-			if err := recordRuntime(ctx, q, a, v.Runtime, map[string]any{
-				"exit_code": v.Result.ExitCode, "timed_out": v.Result.TimedOut,
-			}); err != nil {
-				return err
-			}
-		}
 		j, err := q.GetJob(ctx, a.JobID)
 		if err != nil {
 			return fmt.Errorf("load job: %w", err)
@@ -150,9 +144,9 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 
 		switch {
 		case j.CancelRequestedAt != nil:
-			return endAttempt(ctx, q, a, from, cancelledOnRequest())
+			return s.endAttempt(ctx, q, a, from, cancelledOnRequest())
 		case req.Cancelled:
-			return endAttempt(ctx, q, a, from, outcome{
+			return s.endAttempt(ctx, q, a, from, outcome{
 				to: Cancelled, status: AttemptCancelled, reason: "cancelled while " + string(from),
 			})
 		case req.Error != "":
@@ -160,7 +154,7 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 			if req.Stage != "" {
 				o.details = map[string]any{"stage": req.Stage}
 			}
-			return endAttempt(ctx, q, a, from, o)
+			return s.endAttempt(ctx, q, a, from, o)
 		case from != Verifying:
 			return fmt.Errorf("%w: job %d is %s, not %s", ErrConflict, j.Number, from, Verifying)
 		}
@@ -169,14 +163,29 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 		if err != nil {
 			return fmt.Errorf("load workload: %w", err)
 		}
-		v := judge(a.ExitCode, w.VerificationCommand, req.Verification)
+		var spec workload.Spec
+		if err := json.Unmarshal(w.Spec, &spec); err != nil {
+			return fmt.Errorf("decode workload spec: %w", err)
+		}
+		results := finishVerifications(req)
+		for _, r := range results {
+			if err := recordRuntime(ctx, q, a, r.Runtime, map[string]any{
+				"exit_code": r.Result.ExitCode, "timed_out": r.Result.TimedOut, "check": r.Name,
+			}); err != nil {
+				return err
+			}
+		}
+		v := judge(a.ExitCode, spec, results, req.Integrity)
 		if err := recordVerification(ctx, q, a, v); err != nil {
 			return err
 		}
-		return endAttempt(ctx, q, a, from, v.outcome)
+		return s.endAttempt(ctx, q, a, from, v.outcome)
 	})
 	if err == nil {
-		s.archiveLogs(ctx, ended)
+		if req.Integrity != nil && req.Integrity.Diff != "" {
+			s.storeDiffArtifact(ctx, ended, req.Integrity.Diff)
+		}
+		s.archiveEvidence(ctx, ended)
 	}
 	return err
 }
@@ -185,14 +194,58 @@ func cancelledOnRequest() outcome {
 	return outcome{to: Cancelled, status: AttemptCancelled, reason: "cancelled on request"}
 }
 
-// endAttempt moves the job to a final state, closes the attempt with the
-// matching status, and records the failure if there is one, in the caller's
-// transaction.
-func endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from State, o outcome) error {
-	if _, err := Transition(ctx, q, Change{
+// finishVerifications merges legacy Verification with Verifications.
+func finishVerifications(req workerapi.FinishRequest) []workerapi.VerificationResult {
+	if len(req.Verifications) > 0 {
+		out := make([]workerapi.VerificationResult, len(req.Verifications))
+		copy(out, req.Verifications)
+		for i := range out {
+			if out[i].Name == "" {
+				out[i].Name = "verification"
+			}
+		}
+		return out
+	}
+	if req.Verification == nil {
+		return nil
+	}
+	v := *req.Verification
+	if v.Name == "" {
+		v.Name = "verification"
+	}
+	return []workerapi.VerificationResult{v}
+}
+
+// endAttempt applies the retry/block policy, moves the job, closes the
+// attempt, and records the failure if there is one, in the caller's
+// transaction. The attempt always finishes with o.status; only the job state
+// may become RETRYING or BLOCKED instead of FAILED.
+func (s *Service) endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from State, o outcome) error {
+	o, when := applyPolicy(o, int(a.AttemptNumber), s.maxAttempts, s.retryBackoff, s.retryBackoffCap)
+	eventDetails := maps.Clone(o.details)
+	if eventDetails == nil {
+		eventDetails = map[string]any{}
+	}
+	change := Change{
 		JobID: a.JobID, From: from, To: o.to, Actor: ActorWorker, Reason: o.reason, AttemptID: &a.ID,
-		Details: o.details,
-	}); err != nil {
+		Details: eventDetails,
+	}
+	if o.to == Retrying {
+		change.ClearWorker = true
+		change.ClearCancel = true
+		change.SetScheduledAt = true
+		change.ScheduledAt = when
+		change.Details["attempt"] = a.AttemptNumber
+		change.Details["max_attempts"] = s.maxAttempts
+		if when != nil {
+			change.Details["retry_at"] = when.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	if o.to == Blocked {
+		change.ClearWorker = true
+		change.ClearCancel = true
+	}
+	if _, err := Transition(ctx, q, change); err != nil {
 		return err
 	}
 	var errText *string
@@ -225,6 +278,28 @@ func endAttempt(ctx context.Context, q *db.Queries, a db.JobAttempt, from State,
 		return fmt.Errorf("record failure: %w", err)
 	}
 	return nil
+}
+
+// applyPolicy may turn a FAILED outcome into RETRYING (with backoff) or
+// BLOCKED. Successful and cancelled outcomes are unchanged.
+func applyPolicy(o outcome, attemptNumber, maxAttempts int, base, backoffCap time.Duration) (outcome, *time.Time) {
+	if o.to != Failed || o.category == "" {
+		return o, nil
+	}
+	switch ActionFor(o.category) {
+	case ActionRetry:
+		if attemptNumber < maxAttempts {
+			when := time.Now().Add(RetryBackoff(attemptNumber, base, backoffCap))
+			o.to = Retrying
+			return o, &when
+		}
+		return o, nil
+	case ActionBlock:
+		o.to = Blocked
+		return o, nil
+	default:
+		return o, nil
+	}
 }
 
 // recordVerification stores a verification run and its checks.

@@ -32,6 +32,7 @@ func TestNormalizeAppliesDefaults(t *testing.T) {
 		Resources:          Resources{CPU: 1, MemoryMB: 1024},
 		TimeoutSeconds:     600,
 		Runtime:            Runtime{Image: "golang:1.27", Network: true},
+		Executor:           Executor{Kind: ExecutorCommand},
 	}
 	if !reflect.DeepEqual(spec, want) {
 		t.Fatalf("spec = %+v\nwant   %+v", spec, want)
@@ -65,6 +66,7 @@ func TestNormalizeKeepsExplicitValues(t *testing.T) {
 		TimeoutSeconds:     3600,
 		Runtime:            Runtime{Image: "node:latest", Network: false},
 		Verification:       &Verification{Command: "npm run lint"},
+		Executor:           Executor{Kind: ExecutorCommand},
 	}
 	if !reflect.DeepEqual(spec, want) {
 		t.Fatalf("spec = %+v\nwant   %+v", spec, want)
@@ -169,7 +171,10 @@ func TestNormalizeRejectsInvalidRequests(t *testing.T) {
 		{"image from other registry", with("runtime", map[string]any{"image": "ghcr.io/golang:1.27"}), "runtime.image"},
 		{"image with digest", with("runtime", map[string]any{"image": "golang@sha256:abc"}), "runtime.image"},
 		{"image with empty tag", with("runtime", map[string]any{"image": "golang:"}), "runtime.image"},
-		{"blank verification command", with("verification", map[string]any{"command": ""}), "verification.command"},
+		{"blank verification command", with("verification", map[string]any{"command": ""}), "verification must include"},
+		{"blank verification command text", with("verification", map[string]any{"command": " "}), "verification.command"},
+		{"invalid executor kind", with("executor", map[string]any{"kind": "magic"}), "executor.kind"},
+		{"ai without verification", with("executor", map[string]any{"kind": "ai"}), "executor"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

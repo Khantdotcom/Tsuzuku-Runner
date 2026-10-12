@@ -163,18 +163,44 @@ type FinishRequest struct {
 	// Cancelled reports that the attempt stopped because it was cancelled.
 	Cancelled bool     `json:"cancelled,omitempty"`
 	Runtime   *Runtime `json:"runtime,omitempty"`
-	// Verification is the result of the workload's verification command. It
-	// is absent when the workload has none or the command already failed.
+	// Verification is a single verify result (legacy). Prefer Verifications.
 	Verification *VerificationResult `json:"verification,omitempty"`
+	// Verifications are named verify-container results, in run order.
+	Verifications []VerificationResult `json:"verifications,omitempty"`
+	// Integrity is a git-diff heuristic scan for suspicious test changes.
+	Integrity *IntegrityReport `json:"integrity,omitempty"`
 }
 
-// VerificationResult is how the verification command ended.
+// MaxVerifications caps how many verify results a finish report may carry.
+const MaxVerifications = 6
+
+// MaxIntegrityFindings caps findings on one integrity scan.
+const MaxIntegrityFindings = 32
+
+// MaxIntegrityDiffBytes caps the diff text stored on an integrity report.
+const MaxIntegrityDiffBytes = 32 << 10
+
+// VerificationResult is how one verification command ended.
 type VerificationResult struct {
+	// Name identifies the check (legacy single command uses "verification").
+	Name    string     `json:"name,omitempty"`
 	Command string     `json:"command"`
 	Result  StepResult `json:"result"`
 	Runtime Runtime    `json:"runtime"`
 	// OutputTail is the end of the command's combined output, for display.
 	OutputTail string `json:"output_tail"`
+}
+
+// IntegrityReport is the worker's suspicious-change scan of the workspace diff.
+type IntegrityReport struct {
+	Diff     string             `json:"diff,omitempty"`
+	Findings []IntegrityFinding `json:"findings"`
+}
+
+// IntegrityFinding is one heuristic hit in the workspace diff.
+type IntegrityFinding struct {
+	Rule   string `json:"rule"`
+	Detail string `json:"detail"`
 }
 
 // HeartbeatResponse lists the worker's running attempts that were asked to

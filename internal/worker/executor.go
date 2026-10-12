@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,8 @@ type Reporter interface {
 type ExecutorOptions struct {
 	// Worker is the worker's name, used to label its containers.
 	Worker string
+	// GitImage is the helper image used for checkout and integrity scans.
+	GitImage string
 	// CheckoutTimeout bounds cloning the repository. Zero means 5 minutes.
 	CheckoutTimeout time.Duration
 	// ReportTimeout bounds how long one report is retried. Zero means 1 minute.
@@ -78,6 +81,9 @@ func NewExecutor(rt runtime.Runtime, api Reporter, logger *slog.Logger, opts Exe
 	}
 	if opts.RetryDelay <= 0 {
 		opts.RetryDelay = time.Second
+	}
+	if opts.GitImage == "" {
+		opts.GitImage = "alpine/git:v2.49.1"
 	}
 	return &Executor{rt: rt, api: api, logger: logger, opts: opts, running: make(map[uuid.UUID]*runningAttempt)}
 }
@@ -202,28 +208,76 @@ func (a *attemptRun) run(ctx context.Context) {
 	}
 
 	var req workerapi.FinishRequest
-	if cmd := spec.VerificationCommand(); cmd != nil && executed.ExitCode == 0 && !executed.TimedOut {
-		step.Role, step.Command = workerapi.RoleVerify, *cmd
-		output := runtime.NewTailBuffer(verifyOutputBytes)
-		verified, err := rt.Run(ctx, ws, step, output, output)
-		if err != nil {
-			a.abort(ctx, workerapi.StageVerify, "run verification", err, &verified)
+	if executed.ExitCode == 0 && !executed.TimedOut {
+		if report, err := a.scanIntegrity(ctx, rt, ws, step); err != nil {
+			a.abort(ctx, workerapi.StageVerify, "scan integrity", err, nil)
 			return
+		} else if report != nil {
+			req.Integrity = report
 		}
-		a.log.InfoContext(ctx, "verification finished", "exit_code", verified.ExitCode,
-			"timed_out", verified.TimedOut, "duration", verified.Duration())
-		req.Verification = &workerapi.VerificationResult{
-			Command: *cmd,
-			Result: workerapi.StepResult{
-				ExitCode:   verified.ExitCode,
-				TimedOut:   verified.TimedOut,
-				DurationMS: verified.Duration().Milliseconds(),
-			},
-			Runtime:    runtimeRecord(ws, verified),
-			OutputTail: output.String(),
+		for _, vs := range spec.VerificationSteps() {
+			step.Role, step.Command = workerapi.RoleVerify, vs.Command
+			output := runtime.NewTailBuffer(verifyOutputBytes)
+			verified, err := rt.Run(ctx, ws, step, output, output)
+			if err != nil {
+				a.abort(ctx, workerapi.StageVerify, "run verification "+vs.Name, err, &verified)
+				return
+			}
+			a.log.InfoContext(ctx, "verification finished", "check", vs.Name, "exit_code", verified.ExitCode,
+				"timed_out", verified.TimedOut, "duration", verified.Duration())
+			req.Verifications = append(req.Verifications, workerapi.VerificationResult{
+				Name:    vs.Name,
+				Command: vs.Command,
+				Result: workerapi.StepResult{
+					ExitCode:   verified.ExitCode,
+					TimedOut:   verified.TimedOut,
+					DurationMS: verified.Duration().Milliseconds(),
+				},
+				Runtime:    runtimeRecord(ws, verified),
+				OutputTail: output.String(),
+			})
 		}
 	}
 	a.finish(ctx, req)
+}
+
+const integrityScript = `git diff --name-status HEAD; echo '---TSUZUKU---'; git diff HEAD`
+
+func (a *attemptRun) scanIntegrity(ctx context.Context, rt runtime.Runtime, ws runtime.Workspace, base runtime.Step) (*workerapi.IntegrityReport, error) {
+	step := base
+	step.Role, step.Image, step.Command = workerapi.RoleVerify, a.e.opts.GitImage, integrityScript
+	step.Network = false
+	out := runtime.NewTailBuffer(workerapi.MaxIntegrityDiffBytes)
+	res, err := rt.Run(ctx, ws, step, out, out)
+	if err != nil {
+		return nil, err
+	}
+	if res.TimedOut || res.ExitCode != 0 {
+		// Empty or failed diffs are treated as no findings rather than aborting
+		// the attempt: a missing .git is unusual after checkout but should not
+		// fail a passing command by itself.
+		a.log.WarnContext(ctx, "integrity scan finished without a clean diff",
+			"exit_code", res.ExitCode, "timed_out", res.TimedOut)
+		return &workerapi.IntegrityReport{}, nil
+	}
+	raw := out.String()
+	nameStatus, diff, _ := strings.Cut(raw, "---TSUZUKU---")
+	findings := ScanDiff(nameStatus, diff)
+	report := &workerapi.IntegrityReport{Diff: truncateBytes(diff, workerapi.MaxIntegrityDiffBytes)}
+	for _, f := range findings {
+		if len(report.Findings) >= workerapi.MaxIntegrityFindings {
+			break
+		}
+		report.Findings = append(report.Findings, workerapi.IntegrityFinding{Rule: f.Rule, Detail: truncateBytes(f.Detail, 500)})
+	}
+	return report, nil
+}
+
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 func (a *attemptRun) sendLogs(ctx context.Context, chunks []workerapi.LogChunk) (bool, error) {

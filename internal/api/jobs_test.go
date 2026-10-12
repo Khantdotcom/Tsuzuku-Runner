@@ -86,6 +86,14 @@ func (f *fakeJobService) OpenArtifact(context.Context, uuid.UUID, uuid.UUID) (db
 	return f.artifact, io.NopCloser(strings.NewReader(f.content)), nil
 }
 
+func (f *fakeJobService) BundleZip(_ context.Context, _ uuid.UUID, w io.Writer) (string, error) {
+	if f.openErr != nil {
+		return "", f.openErr
+	}
+	_, _ = io.WriteString(w, "PK")
+	return "job-1-attempt-1-evidence.zip", nil
+}
+
 func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string, scheduledAt *time.Time, priority int32) (job.Submission, error) {
 	f.submits = append(f.submits, submitCall{spec, key, scheduledAt, priority})
 	if f.submitErr != nil {

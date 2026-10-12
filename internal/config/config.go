@@ -74,6 +74,12 @@ type Server struct {
 	SchedulerInterval time.Duration `env:"TSUZUKU_SCHEDULER_INTERVAL" envDefault:"1s"`
 	// LeaseTTL is how long a claimed attempt stays owned without a renewing heartbeat.
 	LeaseTTL time.Duration `env:"TSUZUKU_LEASE_TTL" envDefault:"30s"`
+	// JobMaxAttempts is how many attempts a retryable failure may use before the job fails.
+	JobMaxAttempts int `env:"TSUZUKU_JOB_MAX_ATTEMPTS" envDefault:"3"`
+	// RetryBackoffBase is the wait after the first failed attempt (doubles each time).
+	RetryBackoffBase time.Duration `env:"TSUZUKU_RETRY_BACKOFF_BASE" envDefault:"1s"`
+	// RetryBackoffCap caps exponential backoff between retries.
+	RetryBackoffCap time.Duration `env:"TSUZUKU_RETRY_BACKOFF_CAP" envDefault:"5m"`
 	// ArtifactDir is where job evidence files, such as logs, are stored.
 	ArtifactDir string `env:"TSUZUKU_ARTIFACT_DIR" envDefault:"./data/artifacts"`
 	// MaxLogBytes is how much output one attempt may store; the rest is dropped.
@@ -96,6 +102,10 @@ type Worker struct {
 	// GitImage is the helper image that clones repositories into workspaces.
 	GitImage        string        `env:"TSUZUKU_WORKER_GIT_IMAGE"        envDefault:"alpine/git:v2.49.1"`
 	CheckoutTimeout time.Duration `env:"TSUZUKU_WORKER_CHECKOUT_TIMEOUT" envDefault:"5m"`
+	// AIExecutorEnabled allows workloads with executor.kind=ai on this worker.
+	AIExecutorEnabled bool `env:"TSUZUKU_AI_EXECUTOR_ENABLED" envDefault:"false"`
+	// AIExecutorCommand is a Go text/template for the AI CLI (see worker.AIExecutor).
+	AIExecutorCommand string `env:"TSUZUKU_AI_EXECUTOR_COMMAND"`
 }
 
 // DBTool configures one-shot database commands such as migrate and seed.
@@ -141,6 +151,15 @@ func loadServer(environ map[string]string) (Server, error) {
 	}
 	if cfg.LeaseTTL < time.Second {
 		return Server{}, fmt.Errorf("TSUZUKU_LEASE_TTL must be at least 1s, got %s", cfg.LeaseTTL)
+	}
+	if cfg.JobMaxAttempts < 1 {
+		return Server{}, fmt.Errorf("TSUZUKU_JOB_MAX_ATTEMPTS must be at least 1, got %d", cfg.JobMaxAttempts)
+	}
+	if cfg.RetryBackoffBase < time.Millisecond {
+		return Server{}, fmt.Errorf("TSUZUKU_RETRY_BACKOFF_BASE must be at least 1ms, got %s", cfg.RetryBackoffBase)
+	}
+	if cfg.RetryBackoffCap < cfg.RetryBackoffBase {
+		return Server{}, fmt.Errorf("TSUZUKU_RETRY_BACKOFF_CAP (%s) must be >= TSUZUKU_RETRY_BACKOFF_BASE (%s)", cfg.RetryBackoffCap, cfg.RetryBackoffBase)
 	}
 	if err := cfg.WorkloadLimits.validate(); err != nil {
 		return Server{}, err

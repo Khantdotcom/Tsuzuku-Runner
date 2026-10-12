@@ -13,7 +13,25 @@ import (
 const (
 	reasonAbandonedScheduled = "assigned worker went offline before claim"
 	reasonLeaseExpired       = "lease expired; worker stopped renewing"
+	reasonRetryDue           = "retry backoff elapsed"
 )
+
+// PromoteRetrying moves a due RETRYING job back to QUEUED and clears its
+// scheduled_at so the placer can pick it up on this or the next round.
+func PromoteRetrying(ctx context.Context, q *db.Queries, jobID uuid.UUID) error {
+	_, err := Transition(ctx, q, Change{
+		JobID:          jobID,
+		From:           Retrying,
+		To:             Queued,
+		Actor:          ActorScheduler,
+		Reason:         reasonRetryDue,
+		ClearWorker:    true,
+		ClearCancel:    true,
+		SetScheduledAt: true,
+		Details:        map[string]any{"cause": "retry_due"},
+	})
+	return err
+}
 
 // RequeueAbandonedScheduled moves a SCHEDULED job whose worker went offline
 // back to QUEUED and clears the assignment so another worker can take it.

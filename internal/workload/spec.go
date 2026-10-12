@@ -62,6 +62,7 @@ type Request struct {
 	TimeoutSeconds     *int                 `json:"timeout_seconds"`
 	Runtime            *RuntimeRequest      `json:"runtime"`
 	Verification       *VerificationRequest `json:"verification"`
+	Executor           *ExecutorRequest     `json:"executor"`
 	// ScheduledAt, when set, is when the job becomes placeable. It is not part
 	// of the normalized Spec: idempotent replays compare Spec only.
 	ScheduledAt *time.Time `json:"scheduled_at"`
@@ -123,8 +124,31 @@ type RuntimeRequest struct {
 	Network *bool  `json:"network"`
 }
 
-// VerificationRequest is an optional command run after the workload command.
+// MaxVerificationChecks caps named verification.checks (legacy command is extra).
+const MaxVerificationChecks = 5
+
+// Executor kinds on a workload.
+const (
+	ExecutorCommand = "command"
+	ExecutorAI      = "ai"
+)
+
+// ExecutorRequest selects how the worker carries out the main step.
+type ExecutorRequest struct {
+	Kind   string `json:"kind"`
+	Prompt string `json:"prompt"`
+}
+
+// VerificationRequest is an optional command and/or named checks run after the
+// workload command succeeds.
 type VerificationRequest struct {
+	Command string                     `json:"command"`
+	Checks  []VerificationCheckRequest `json:"checks"`
+}
+
+// VerificationCheckRequest is one named verification command.
+type VerificationCheckRequest struct {
+	Name    string `json:"name"`
 	Command string `json:"command"`
 }
 
@@ -139,6 +163,13 @@ type Spec struct {
 	TimeoutSeconds     int           `json:"timeout_seconds"`
 	Runtime            Runtime       `json:"runtime"`
 	Verification       *Verification `json:"verification,omitempty"`
+	Executor           Executor      `json:"executor"`
+}
+
+// Executor names how the worker runs the main step (command shell vs AI CLI).
+type Executor struct {
+	Kind   string `json:"kind"`
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // Resources is the CPU (in cores) and memory a workload runs with.
@@ -153,9 +184,22 @@ type Runtime struct {
 	Network bool   `json:"network"`
 }
 
-// Verification is the command that checks the workload's result.
+// Verification holds the command(s) that check the workload's result.
 type Verification struct {
+	Command string              `json:"command,omitempty"`
+	Checks  []VerificationCheck `json:"checks,omitempty"`
+}
+
+// VerificationCheck is one named verification command in a Spec.
+type VerificationCheck struct {
+	Name    string `json:"name"`
 	Command string `json:"command"`
+}
+
+// VerificationStep is one command the worker should run as a verify container.
+type VerificationStep struct {
+	Name    string
+	Command string
 }
 
 // CPUMillis returns the CPU request in millicores.
@@ -163,13 +207,32 @@ func (s Spec) CPUMillis() int {
 	return int(math.Round(s.Resources.CPU * 1000))
 }
 
-// VerificationCommand returns the verification command, or nil if there is none.
+// VerificationCommand returns the primary verification command for the
+// workloads.verification_command column, or nil if there is none.
 func (s Spec) VerificationCommand() *string {
+	steps := s.VerificationSteps()
+	if len(steps) == 0 {
+		return nil
+	}
+	cmd := steps[0].Command
+	return &cmd
+}
+
+// VerificationSteps returns verify containers to run after a successful
+// command: the legacy verification.command first (name "verification"), then
+// named checks in order.
+func (s Spec) VerificationSteps() []VerificationStep {
 	if s.Verification == nil {
 		return nil
 	}
-	cmd := s.Verification.Command
-	return &cmd
+	var out []VerificationStep
+	if s.Verification.Command != "" {
+		out = append(out, VerificationStep{Name: "verification", Command: s.Verification.Command})
+	}
+	for _, c := range s.Verification.Checks {
+		out = append(out, VerificationStep(c))
+	}
+	return out
 }
 
 // Normalize validates r against limits and returns the Spec with defaults
@@ -186,6 +249,7 @@ func (r Request) Normalize(limits Limits) (Spec, error) {
 		},
 		TimeoutSeconds: min(DefaultTimeoutSeconds, int(limits.MaxTimeout/time.Second)),
 		Runtime:        Runtime{Image: DefaultImage, Network: true},
+		Executor:       Executor{Kind: ExecutorCommand},
 	}
 
 	if err := validateRepository(r.Repository); err != nil {
@@ -245,10 +309,61 @@ func (r Request) Normalize(limits Limits) (Spec, error) {
 	}
 
 	if v := r.Verification; v != nil {
-		if err := validateCommand("verification.command", v.Command); err != nil {
-			return Spec{}, err
+		if v.Command == "" && len(v.Checks) == 0 {
+			return Spec{}, errors.New("verification must include command and/or checks")
 		}
-		spec.Verification = &Verification{Command: v.Command}
+		ver := &Verification{}
+		if v.Command != "" {
+			if err := validateCommand("verification.command", v.Command); err != nil {
+				return Spec{}, err
+			}
+			ver.Command = v.Command
+		}
+		if len(v.Checks) > MaxVerificationChecks {
+			return Spec{}, fmt.Errorf("verification.checks must have at most %d items", MaxVerificationChecks)
+		}
+		names := map[string]struct{}{}
+		if ver.Command != "" {
+			names["verification"] = struct{}{}
+		}
+		for i, c := range v.Checks {
+			name := strings.TrimSpace(c.Name)
+			if name == "" || utf8.RuneCountInString(name) > 64 || strings.ContainsRune(name, 0) {
+				return Spec{}, fmt.Errorf("verification.checks[%d].name must be 1-64 characters", i)
+			}
+			if name == "verification" || name == "exit_code" {
+				return Spec{}, fmt.Errorf("verification.checks[%d].name %q is reserved", i, name)
+			}
+			if _, dup := names[name]; dup {
+				return Spec{}, fmt.Errorf("verification.checks[%d].name %q is duplicated", i, name)
+			}
+			if err := validateCommand(fmt.Sprintf("verification.checks[%d].command", i), c.Command); err != nil {
+				return Spec{}, err
+			}
+			names[name] = struct{}{}
+			ver.Checks = append(ver.Checks, VerificationCheck{Name: name, Command: c.Command})
+		}
+		spec.Verification = ver
+	}
+
+	if ex := r.Executor; ex != nil {
+		kind := strings.TrimSpace(ex.Kind)
+		if kind == "" {
+			kind = ExecutorCommand
+		}
+		switch kind {
+		case ExecutorCommand, ExecutorAI:
+		default:
+			return Spec{}, errors.New(`executor.kind must be "command" or "ai"`)
+		}
+		if kind == ExecutorAI && spec.Verification == nil {
+			return Spec{}, errors.New("executor.kind ai requires verification.command or verification.checks")
+		}
+		prompt := strings.TrimSpace(ex.Prompt)
+		if utf8.RuneCountInString(prompt) > maxCommandLen {
+			return Spec{}, fmt.Errorf("executor.prompt must be at most %d characters", maxCommandLen)
+		}
+		spec.Executor = Executor{Kind: kind, Prompt: prompt}
 	}
 
 	return spec, nil

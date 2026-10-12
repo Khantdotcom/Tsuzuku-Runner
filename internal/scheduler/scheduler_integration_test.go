@@ -414,3 +414,28 @@ func TestConcurrentTicksNeverOverfill(t *testing.T) {
 		t.Errorf("%d jobs were scheduled more than once", doubled)
 	}
 }
+
+func TestTickPromotesDueRetryingJobs(t *testing.T) {
+	pool := storetest.NewPool(t)
+	addWorker(t, pool, "w", 1)
+	jobs := submit(t, pool, 1)
+	exec(t, pool, `
+		UPDATE jobs
+		SET state = 'RETRYING', scheduled_at = now() - interval '1 second', assigned_worker_id = NULL
+		WHERE id = $1`, jobs[0])
+
+	placed, err := newScheduler(pool, nil).Tick(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(placed) != 1 || placed[0].JobID != jobs[0] {
+		t.Fatalf("placed %+v, want the promoted job scheduled", placed)
+	}
+	j := getJob(t, pool, jobs[0])
+	if j.State != string(job.Scheduled) {
+		t.Errorf("state = %s, want SCHEDULED after promote+place", j.State)
+	}
+	if j.ScheduledAt != nil {
+		t.Errorf("scheduled_at = %v, want cleared on promote", j.ScheduledAt)
+	}
+}
