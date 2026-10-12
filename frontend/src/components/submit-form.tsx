@@ -34,6 +34,7 @@ export function SubmitForm() {
         memory_mb: Number(fd.get("memory_mb") || 1024),
       },
       timeout_seconds: Number(fd.get("timeout_seconds") || 600),
+      priority: Number(fd.get("priority") || 0),
       runtime: {
         image: String(fd.get("image") || "golang:1.27").trim(),
         network: fd.get("network") === "on",
@@ -100,10 +101,19 @@ export function SubmitForm() {
 
       <fieldset className="space-y-4 rounded-xl border border-border/80 p-4">
         <legend className="px-1 text-sm font-medium">Resources</legend>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="CPU (cores)" name="cpu" type="number" step="0.1" defaultValue="1" />
           <Field label="Memory (MB)" name="memory_mb" type="number" defaultValue="1024" />
           <Field label="Timeout (s)" name="timeout_seconds" type="number" defaultValue="600" />
+          <Field
+            label="Priority"
+            name="priority"
+            type="number"
+            min={0}
+            max={100}
+            defaultValue="0"
+            hint="0–100; higher jobs are placed first"
+          />
         </div>
         <Field label="Image" name="image" defaultValue="golang:1.27" />
         <label className="flex items-center gap-2 text-sm">

@@ -43,13 +43,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Stats"
+  /api/v1/queue:
+    get:
+      summary: Placeable queued jobs ordered for the scheduler
+      operationId: getQueue
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: Queued jobs with priority and requested resources
   /api/v1/workers:
     get:
       summary: List registered workers
       operationId: listWorkers
       responses:
         "200":
-          description: Worker fleet
+          description: Worker fleet with reserved capacity
   /api/v1/workloads:
     post:
       summary: Submit a workload
@@ -292,3 +307,9 @@ components:
           type: string
           format: date-time
           description: When the job becomes placeable; omit to run as soon as a worker is free
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 0
+          description: Placement priority; higher values are placed first

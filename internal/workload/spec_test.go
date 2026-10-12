@@ -221,6 +221,23 @@ func TestValidateScheduledAt(t *testing.T) {
 	}
 }
 
+func TestValidatePriority(t *testing.T) {
+	if err := (Request{}).ValidatePriority(); err != nil {
+		t.Fatalf("nil priority: %v", err)
+	}
+	ok := 50
+	if err := (Request{Priority: &ok}).ValidatePriority(); err != nil {
+		t.Fatalf("priority 50: %v", err)
+	}
+	if got := (Request{Priority: &ok}).PriorityOrZero(); got != 50 {
+		t.Errorf("PriorityOrZero = %d, want 50", got)
+	}
+	bad := 101
+	if err := (Request{Priority: &bad}).ValidatePriority(); err == nil {
+		t.Fatal("priority 101 accepted")
+	}
+}
+
 func TestValidateIdempotencyKey(t *testing.T) {
 	for _, key := range []string{"a", "order-123", "2f1c:retry/1", strings.Repeat("k", 255)} {
 		if err := ValidateIdempotencyKey(key); err != nil {

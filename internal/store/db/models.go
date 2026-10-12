@@ -57,6 +57,7 @@ type Job struct {
 	UpdatedAt         time.Time
 	StartedAt         *time.Time
 	FinishedAt        *time.Time
+	Priority          int32
 }
 
 type JobAttempt struct {

@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
@@ -92,37 +91,63 @@ func (s *Scheduler) Tick(ctx context.Context) ([]Assignment, error) {
 			return fmt.Errorf("list workers: %w", err)
 		}
 		workers := make([]Candidate, 0, len(rows))
-		free := 0
 		for _, r := range rows {
-			c := Candidate{ID: r.ID, Name: r.Name, Slots: int(r.Slots), Active: int(r.ActiveJobs)}
-			workers = append(workers, c)
-			free += c.Free()
+			c := Candidate{
+				ID:          r.ID,
+				Name:        r.Name,
+				Slots:       int(r.Slots),
+				Active:      int(r.ActiveJobs),
+				CPUMillis:   int(r.CpuMillis),
+				MemoryMB:    int(r.MemoryMB),
+				ReservedCPU: int(r.ReservedCpuMillis),
+				ReservedMem: int(r.ReservedMemoryMb),
+			}
+			if c.Free() > 0 && c.RemainingCPU() > 0 && c.RemainingMem() > 0 {
+				workers = append(workers, c)
+			}
 		}
-		if free == 0 {
+		if len(workers) == 0 {
 			return nil
 		}
 
-		limit := int32(min(free, s.opts.BatchSize)) //nolint:gosec // at most BatchSize
+		// Lock a full batch: unfit jobs are skipped, so slot count alone is not
+		// a safe upper bound on how many rows to consider.
+		limit := int32(s.opts.BatchSize) //nolint:gosec // BatchSize is a small positive cap
 		jobs, err := q.LockQueuedJobs(ctx, limit)
 		if err != nil {
 			return fmt.Errorf("lock queued jobs: %w", err)
 		}
-		ids := make([]uuid.UUID, 0, len(jobs))
+		reqs := make([]JobRequest, 0, len(jobs))
 		for _, j := range jobs {
-			ids = append(ids, j.ID)
+			reqs = append(reqs, JobRequest{
+				ID:        j.ID,
+				CPUMillis: int(j.CpuMillis),
+				MemoryMB:  int(j.MemoryMB),
+			})
 		}
 
-		assignments := Place(ids, workers)
+		assignments := Place(reqs, workers)
 		for _, a := range assignments {
 			workerID := a.Worker.ID
+			reason := fmt.Sprintf(
+				"placed on %s (%d/%d slots, %d/%dmCPU, %d/%dMB reserved)",
+				a.Worker.Name,
+				a.Worker.Active, a.Worker.Slots,
+				a.Worker.ReservedCPU, a.Worker.CPUMillis,
+				a.Worker.ReservedMem, a.Worker.MemoryMB,
+			)
 			if _, err := job.Transition(ctx, q, job.Change{
 				JobID:        a.JobID,
 				From:         job.Queued,
 				To:           job.Scheduled,
 				Actor:        job.ActorScheduler,
-				Reason:       fmt.Sprintf("placed on %s (%d of %d slots busy)", a.Worker.Name, a.Worker.Active, a.Worker.Slots),
+				Reason:       reason,
 				AssignWorker: &workerID,
-				Details:      map[string]any{"worker_id": workerID, "worker_name": a.Worker.Name},
+				Details: map[string]any{
+					"worker_id": workerID, "worker_name": a.Worker.Name,
+					"reserved_cpu_millis": a.Worker.ReservedCPU, "worker_cpu_millis": a.Worker.CPUMillis,
+					"reserved_memory_mb": a.Worker.ReservedMem, "worker_memory_mb": a.Worker.MemoryMB,
+				},
 			}); err != nil {
 				return fmt.Errorf("schedule job %s: %w", a.JobID, err)
 			}

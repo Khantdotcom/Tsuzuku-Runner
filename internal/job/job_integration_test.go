@@ -62,7 +62,7 @@ func TestSubmitCreatesQueuedJob(t *testing.T) {
 	svc := job.NewService(pool)
 	spec := newSpec(t, "go test ./...")
 
-	sub, err := svc.Submit(t.Context(), spec, "", nil)
+	sub, err := svc.Submit(t.Context(), spec, "", nil, 0)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestSubmitWithSchedule(t *testing.T) {
 	pool := storetest.NewPool(t)
 	svc := job.NewService(pool)
 	at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
-	sub, err := svc.Submit(t.Context(), newSpec(t, "go test ./..."), "", &at)
+	sub, err := svc.Submit(t.Context(), newSpec(t, "go test ./..."), "", &at, 0)
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -127,11 +127,11 @@ func TestSubmitIdempotency(t *testing.T) {
 	svc := job.NewService(pool)
 	spec := newSpec(t, "go test ./...")
 
-	first, err := svc.Submit(t.Context(), spec, "key-1", nil)
+	first, err := svc.Submit(t.Context(), spec, "key-1", nil, 0)
 	if err != nil {
 		t.Fatalf("first Submit: %v", err)
 	}
-	again, err := svc.Submit(t.Context(), newSpec(t, "go test ./..."), "key-1", nil)
+	again, err := svc.Submit(t.Context(), newSpec(t, "go test ./..."), "key-1", nil, 0)
 	if err != nil {
 		t.Fatalf("replayed Submit: %v", err)
 	}
@@ -139,12 +139,12 @@ func TestSubmitIdempotency(t *testing.T) {
 		t.Errorf("replay = %+v, want job %s replayed", again, first.Job.ID)
 	}
 
-	_, err = svc.Submit(t.Context(), newSpec(t, "make test"), "key-1", nil)
+	_, err = svc.Submit(t.Context(), newSpec(t, "make test"), "key-1", nil, 0)
 	if !errors.Is(err, job.ErrIdempotencyMismatch) {
 		t.Errorf("different body under the same key: err = %v, want ErrIdempotencyMismatch", err)
 	}
 
-	other, err := svc.Submit(t.Context(), spec, "key-2", nil)
+	other, err := svc.Submit(t.Context(), spec, "key-2", nil, 0)
 	if err != nil || other.Replayed || other.Job.ID == first.Job.ID {
 		t.Errorf("new key: %+v, %v; want a new job", other.Job, err)
 	}
@@ -168,7 +168,7 @@ func TestConcurrentSubmitsWithSameKey(t *testing.T) {
 	for i := range n {
 		wg.Go(func() {
 			<-start
-			sub, err := svc.Submit(t.Context(), spec, "same-key", nil)
+			sub, err := svc.Submit(t.Context(), spec, "same-key", nil, 0)
 			ids[i], errs[i] = sub.Job.ID, err
 		})
 	}
@@ -193,7 +193,7 @@ func TestConcurrentSubmitsWithSameKey(t *testing.T) {
 
 func TestConcurrentTransitionsHaveOneWinner(t *testing.T) {
 	pool := storetest.NewPool(t)
-	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil)
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestConcurrentTransitionsHaveOneWinner(t *testing.T) {
 
 func TestTransitionLifecycle(t *testing.T) {
 	pool := storetest.NewPool(t)
-	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil)
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestTransitionLifecycle(t *testing.T) {
 
 func TestTransitionFailureFromPreparingSetsFinished(t *testing.T) {
 	pool := storetest.NewPool(t)
-	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil)
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestTransitionFailureFromPreparingSetsFinished(t *testing.T) {
 
 func TestTransitionRejections(t *testing.T) {
 	pool := storetest.NewPool(t)
-	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil)
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, "go test ./..."), "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func addWorker(t *testing.T, pool *pgxpool.Pool, name string) uuid.UUID {
 // submitAssigned submits a job and schedules it on workerID.
 func submitAssigned(t *testing.T, pool *pgxpool.Pool, command string, workerID uuid.UUID) db.Job {
 	t.Helper()
-	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, command), "", nil)
+	sub, err := job.NewService(pool).Submit(t.Context(), newSpec(t, command), "", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestClaimOnlyAssignedJobs(t *testing.T) {
 	owner := addWorker(t, pool, "owner")
 	other := addWorker(t, pool, "other")
 	submitAssigned(t, pool, "make", owner)
-	if _, err := svc.Submit(t.Context(), newSpec(t, "queued only"), "", nil); err != nil {
+	if _, err := svc.Submit(t.Context(), newSpec(t, "queued only"), "", nil, 0); err != nil {
 		t.Fatal(err)
 	}
 

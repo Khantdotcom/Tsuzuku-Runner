@@ -25,8 +25,9 @@ const (
 
 // JobService is what the job endpoints need. *job.Service implements it.
 type JobService interface {
-	Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (job.Submission, error)
+	Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time, priority int32) (job.Submission, error)
 	Stats(ctx context.Context) (job.Stats, error)
+	Queue(ctx context.Context, limit int32) ([]job.QueueItem, error)
 	Find(ctx context.Context, ref job.Ref) (db.Job, error)
 	Detail(ctx context.Context, j db.Job) (job.Detail, error)
 	List(ctx context.Context, p job.ListParams) ([]db.ListJobsRow, error)
@@ -43,6 +44,7 @@ type jobView struct {
 	ID                uuid.UUID  `json:"id"`
 	Number            int64      `json:"number"`
 	State             string     `json:"state"`
+	Priority          int32      `json:"priority"`
 	AssignedWorkerID  *uuid.UUID `json:"assigned_worker_id"`
 	ScheduledAt       *time.Time `json:"scheduled_at"`
 	CancelRequestedAt *time.Time `json:"cancel_requested_at"`
@@ -50,6 +52,20 @@ type jobView struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	StartedAt         *time.Time `json:"started_at"`
 	FinishedAt        *time.Time `json:"finished_at"`
+}
+
+type queueItemView struct {
+	ID          uuid.UUID  `json:"id"`
+	Number      int64      `json:"number"`
+	Priority    int32      `json:"priority"`
+	CPUMillis   int32      `json:"cpu_millis"`
+	MemoryMB    int32      `json:"memory_mb"`
+	Image       string     `json:"image"`
+	Repository  string     `json:"repository"`
+	Revision    string     `json:"revision"`
+	Command     string     `json:"command"`
+	ScheduledAt *time.Time `json:"scheduled_at"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 type workloadSummaryView struct {
@@ -130,13 +146,17 @@ func (s *server) handleSubmitWorkload(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	if err := req.ValidatePriority(); err != nil {
+		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	spec, err := req.Normalize(s.workloadLimits)
 	if err != nil {
 		writeProblem(w, r, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 
-	sub, err := s.jobs.Submit(r.Context(), spec, key, req.ScheduledAt)
+	sub, err := s.jobs.Submit(r.Context(), spec, key, req.ScheduledAt, req.PriorityOrZero())
 	if errors.Is(err, job.ErrIdempotencyMismatch) {
 		writeProblem(w, r, http.StatusConflict, "this Idempotency-Key was already used for a different workload")
 		return
@@ -165,6 +185,28 @@ func (s *server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(w, r, maxPageSize)
+	if !ok {
+		return
+	}
+	items, err := s.jobs.Queue(r.Context(), limit)
+	if err != nil {
+		s.internalError(w, r, "list queue", err)
+		return
+	}
+	views := make([]queueItemView, 0, len(items))
+	for _, item := range items {
+		views = append(views, queueItemView{
+			ID: item.Job.ID, Number: item.Job.Number, Priority: item.Job.Priority,
+			CPUMillis: item.CPUMillis, MemoryMB: item.MemoryMB, Image: item.Image,
+			Repository: item.RepositoryURL, Revision: item.Revision, Command: item.Command,
+			ScheduledAt: item.Job.ScheduledAt, CreatedAt: item.Job.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": views})
 }
 
 func (s *server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -348,8 +390,9 @@ func parseAfter(w http.ResponseWriter, r *http.Request) (int64, bool) {
 
 func newJobView(j db.Job) jobView {
 	return jobView{
-		ID: j.ID, Number: j.Number, State: j.State, AssignedWorkerID: j.AssignedWorkerID,
-		ScheduledAt: j.ScheduledAt, CancelRequestedAt: j.CancelRequestedAt,
+		ID: j.ID, Number: j.Number, State: j.State, Priority: j.Priority,
+		AssignedWorkerID: j.AssignedWorkerID,
+		ScheduledAt:      j.ScheduledAt, CancelRequestedAt: j.CancelRequestedAt,
 		CreatedAt: j.CreatedAt, UpdatedAt: j.UpdatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt,
 	}
 }

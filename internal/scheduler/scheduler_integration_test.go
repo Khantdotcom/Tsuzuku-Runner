@@ -55,7 +55,7 @@ func submit(t *testing.T, pool *pgxpool.Pool, n int) []uuid.UUID {
 		if err != nil {
 			t.Fatal(err)
 		}
-		sub, err := svc.Submit(t.Context(), spec, "", nil)
+		sub, err := svc.Submit(t.Context(), spec, "", nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -219,6 +219,67 @@ func TestTickBroadcastsOnlyWhenPlacing(t *testing.T) {
 		t.Fatal("no broadcast after placing a job")
 	}
 }
+
+func TestTickSkipsUnfitJobsAndPlacesByPriority(t *testing.T) {
+	pool := storetest.NewPool(t)
+	// Capacity: 2 slots, 2000 mCPU, 8192 MB — cannot take a 4000 mCPU job.
+	w, err := db.New(pool).CreateWorker(t.Context(), db.CreateWorkerParams{
+		ID: uuid.Must(uuid.NewV7()), Name: "tight", Slots: 2, CpuMillis: 2000, MemoryMB: 8192, Metadata: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := job.NewService(pool)
+
+	// 2.5 cores = 2500 mCPU, above the worker's 2000 mCPU capacity.
+	hugeSpec, err := workload.Request{
+		Repository: "https://github.com/example/app", Revision: "main", Command: "huge",
+		Resources: &workload.ResourcesRequest{CPU: ptrFloat(2.5), MemoryMB: ptrInt(1024)},
+	}.Normalize(workload.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallSpec, err := workload.Request{
+		Repository: "https://github.com/example/app", Revision: "main", Command: "small",
+		Resources: &workload.ResourcesRequest{CPU: ptrFloat(0.5), MemoryMB: ptrInt(512)},
+	}.Normalize(workload.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	huge, err := svc.Submit(t.Context(), hugeSpec, "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	low, err := svc.Submit(t.Context(), smallSpec, "", nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	high, err := svc.Submit(t.Context(), smallSpec, "", nil, 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	placed, err := newScheduler(pool, nil).Tick(t.Context())
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if len(placed) != 2 {
+		t.Fatalf("placed %d, want 2 (skip huge, place two small)", len(placed))
+	}
+	if placed[0].JobID != high.Job.ID || placed[1].JobID != low.Job.ID {
+		t.Errorf("order = %v then %v, want high priority then low", placed[0].JobID, placed[1].JobID)
+	}
+	if j := getJob(t, pool, huge.Job.ID); j.State != string(job.Queued) {
+		t.Errorf("huge job state = %s, want QUEUED", j.State)
+	}
+	if j := getJob(t, pool, high.Job.ID); j.State != string(job.Scheduled) || j.AssignedWorkerID == nil || *j.AssignedWorkerID != w.ID {
+		t.Errorf("high-priority job = %+v", j)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+func ptrInt(v int) *int           { return &v }
 
 func TestTickRequeuesAbandonedScheduledJobs(t *testing.T) {
 	pool := storetest.NewPool(t)

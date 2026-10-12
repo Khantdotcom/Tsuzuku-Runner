@@ -17,8 +17,8 @@ SELECT * FROM workloads
 WHERE idempotency_key = @idempotency_key;
 
 -- name: CreateJob :one
-INSERT INTO jobs (id, workload_id, scheduled_at)
-VALUES (@id, @workload_id, @scheduled_at)
+INSERT INTO jobs (id, workload_id, scheduled_at, priority)
+VALUES (@id, @workload_id, @scheduled_at, @priority)
 RETURNING *;
 
 -- name: GetJob :one
@@ -86,15 +86,31 @@ RETURNING *;
 SELECT pg_try_advisory_xact_lock(@lock_key::bigint) AS locked;
 
 -- name: LockQueuedJobs :many
--- LockQueuedJobs returns the oldest placeable QUEUED jobs and locks them for
--- this transaction. SKIP LOCKED passes over rows another transaction holds
--- instead of waiting for them.
-SELECT * FROM jobs
-WHERE state = 'QUEUED'
-  AND (scheduled_at IS NULL OR scheduled_at <= now())
-ORDER BY created_at, number
+-- LockQueuedJobs returns placeable QUEUED jobs (higher priority first, then
+-- oldest) with their resource requests, locking the job rows for this
+-- transaction. SKIP LOCKED passes over rows another transaction holds.
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority, w.cpu_millis, w.memory_mb, w.image
+FROM jobs j
+JOIN workloads w ON w.id = j.workload_id
+WHERE j.state = 'QUEUED'
+  AND (j.scheduled_at IS NULL OR j.scheduled_at <= now())
+ORDER BY j.priority DESC, j.created_at, j.number
 LIMIT @row_limit
-FOR UPDATE SKIP LOCKED;
+FOR UPDATE OF j SKIP LOCKED;
+
+-- name: ListQueuedJobs :many
+-- ListQueuedJobs is the dashboard queue: placeable QUEUED jobs with resources.
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority, w.cpu_millis, w.memory_mb, w.image, w.repository_url, w.revision, w.command
+FROM jobs j
+JOIN workloads w ON w.id = j.workload_id
+WHERE j.state = 'QUEUED'
+  AND (j.scheduled_at IS NULL OR j.scheduled_at <= now())
+ORDER BY j.priority DESC, j.created_at, j.number
+LIMIT @row_limit;
 
 -- name: LockNextAssignedJob :one
 -- LockNextAssignedJob returns the oldest SCHEDULED job assigned to a worker

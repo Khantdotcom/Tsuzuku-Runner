@@ -88,7 +88,8 @@ FOR UPDATE OF l, j SKIP LOCKED;
 -- ListAbandonedScheduledJobs finds SCHEDULED jobs whose worker has gone
 -- offline before claiming them.
 SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
-       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority
 FROM jobs j
 JOIN workers w ON w.id = j.assigned_worker_id
 WHERE j.state = 'SCHEDULED'

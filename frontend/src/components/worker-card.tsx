@@ -1,7 +1,7 @@
 import { SlidingNumber } from "@/components/animate-ui/primitives/texts/sliding-number";
 import { GlowCard } from "@/components/glow-card";
 import type { Worker } from "@/lib/api";
-import { formatAgo, formatCores, formatMemory } from "@/lib/format";
+import { formatAgo, formatCores, formatMemory, reservedPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function clampPercent(value: number): number {
@@ -79,7 +79,7 @@ export function WorkerCard({ worker, now }: { worker: Worker; now: number | null
       <div className="mt-5 space-y-4 text-sm">
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between">
-            <span className="text-muted-foreground">CPU</span>
+            <span className="text-muted-foreground">CPU (host)</span>
             {cpu === null ? (
               <span className="font-mono text-muted-foreground">—</span>
             ) : (
@@ -93,18 +93,44 @@ export function WorkerCard({ worker, now }: { worker: Worker; now: number | null
 
         <div className="space-y-1.5">
           <div className="flex items-baseline justify-between">
-            <span className="text-muted-foreground">Memory</span>
+            <span className="text-muted-foreground">Memory (host)</span>
             <span className="font-mono tabular-nums">
               {memUsed === null ? "—" : formatMemory(memUsed)} / {formatMemory(worker.memory_mb)}
             </span>
           </div>
           <UsageBar percent={memPercent} active={online} />
         </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between">
+            <span className="text-muted-foreground">Reserved CPU</span>
+            <span className="font-mono tabular-nums">
+              {formatCores(worker.reserved_cpu_millis)} / {formatCores(worker.cpu_millis)}
+            </span>
+          </div>
+          <UsageBar
+            percent={reservedPercent(worker.reserved_cpu_millis, worker.cpu_millis)}
+            active={online}
+          />
+        </div>
+
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between">
+            <span className="text-muted-foreground">Reserved memory</span>
+            <span className="font-mono tabular-nums">
+              {formatMemory(worker.reserved_memory_mb)} / {formatMemory(worker.memory_mb)}
+            </span>
+          </div>
+          <UsageBar
+            percent={reservedPercent(worker.reserved_memory_mb, worker.memory_mb)}
+            active={online}
+          />
+        </div>
       </div>
 
       <div className="mt-5 flex items-center justify-between border-t border-border/60 pt-3 text-xs text-muted-foreground">
         <span>
-          {worker.slots} {worker.slots === 1 ? "slot" : "slots"} · {formatCores(worker.cpu_millis)}
+          {worker.active_jobs}/{worker.slots} jobs · {formatCores(worker.cpu_millis)}
         </span>
         <span title={new Date(worker.last_heartbeat_at).toLocaleString()}>
           heartbeat {now === null ? "…" : formatAgo(worker.last_heartbeat_at, now)}

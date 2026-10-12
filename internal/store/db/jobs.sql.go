@@ -46,19 +46,25 @@ func (q *Queries) CountJobsByState(ctx context.Context) ([]CountJobsByStateRow, 
 }
 
 const createJob = `-- name: CreateJob :one
-INSERT INTO jobs (id, workload_id, scheduled_at)
-VALUES ($1, $2, $3)
-RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
+INSERT INTO jobs (id, workload_id, scheduled_at, priority)
+VALUES ($1, $2, $3, $4)
+RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority
 `
 
 type CreateJobParams struct {
 	ID          uuid.UUID
 	WorkloadID  uuid.UUID
 	ScheduledAt *time.Time
+	Priority    int32
 }
 
 func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, error) {
-	row := q.db.QueryRow(ctx, createJob, arg.ID, arg.WorkloadID, arg.ScheduledAt)
+	row := q.db.QueryRow(ctx, createJob,
+		arg.ID,
+		arg.WorkloadID,
+		arg.ScheduledAt,
+		arg.Priority,
+	)
 	var i Job
 	err := row.Scan(
 		&i.ID,
@@ -72,6 +78,7 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, erro
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -172,7 +179,7 @@ func (q *Queries) CreateWorkload(ctx context.Context, arg CreateWorkloadParams) 
 }
 
 const getFirstJobForWorkload = `-- name: GetFirstJobForWorkload :one
-SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority FROM jobs
 WHERE workload_id = $1
 ORDER BY number
 LIMIT 1
@@ -193,12 +200,13 @@ func (q *Queries) GetFirstJobForWorkload(ctx context.Context, workloadID uuid.UU
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
 
 const getJob = `-- name: GetJob :one
-SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority FROM jobs
 WHERE id = $1
 `
 
@@ -217,12 +225,13 @@ func (q *Queries) GetJob(ctx context.Context, id uuid.UUID) (Job, error) {
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
 
 const getJobByNumber = `-- name: GetJobByNumber :one
-SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority FROM jobs
 WHERE number = $1
 `
 
@@ -241,6 +250,7 @@ func (q *Queries) GetJobByNumber(ctx context.Context, number int64) (Job, error)
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -340,7 +350,7 @@ func (q *Queries) ListJobEvents(ctx context.Context, arg ListJobEventsParams) ([
 }
 
 const listJobs = `-- name: ListJobs :many
-SELECT jobs.id, jobs.number, jobs.workload_id, jobs.state, jobs.assigned_worker_id, jobs.scheduled_at, jobs.cancel_requested_at, jobs.created_at, jobs.updated_at, jobs.started_at, jobs.finished_at, w.repository_url, w.revision, w.command, w.image
+SELECT jobs.id, jobs.number, jobs.workload_id, jobs.state, jobs.assigned_worker_id, jobs.scheduled_at, jobs.cancel_requested_at, jobs.created_at, jobs.updated_at, jobs.started_at, jobs.finished_at, jobs.priority, w.repository_url, w.revision, w.command, w.image
 FROM jobs
 JOIN workloads w ON w.id = jobs.workload_id
 WHERE ($1::text IS NULL OR jobs.state = $1::text)
@@ -386,10 +396,84 @@ func (q *Queries) ListJobs(ctx context.Context, arg ListJobsParams) ([]ListJobsR
 			&i.Job.UpdatedAt,
 			&i.Job.StartedAt,
 			&i.Job.FinishedAt,
+			&i.Job.Priority,
 			&i.RepositoryURL,
 			&i.Revision,
 			&i.Command,
 			&i.Image,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listQueuedJobs = `-- name: ListQueuedJobs :many
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority, w.cpu_millis, w.memory_mb, w.image, w.repository_url, w.revision, w.command
+FROM jobs j
+JOIN workloads w ON w.id = j.workload_id
+WHERE j.state = 'QUEUED'
+  AND (j.scheduled_at IS NULL OR j.scheduled_at <= now())
+ORDER BY j.priority DESC, j.created_at, j.number
+LIMIT $1
+`
+
+type ListQueuedJobsRow struct {
+	ID                uuid.UUID
+	Number            int64
+	WorkloadID        uuid.UUID
+	State             string
+	AssignedWorkerID  *uuid.UUID
+	ScheduledAt       *time.Time
+	CancelRequestedAt *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	StartedAt         *time.Time
+	FinishedAt        *time.Time
+	Priority          int32
+	CpuMillis         int32
+	MemoryMB          int32
+	Image             string
+	RepositoryURL     string
+	Revision          string
+	Command           string
+}
+
+// ListQueuedJobs is the dashboard queue: placeable QUEUED jobs with resources.
+func (q *Queries) ListQueuedJobs(ctx context.Context, rowLimit int32) ([]ListQueuedJobsRow, error) {
+	rows, err := q.db.Query(ctx, listQueuedJobs, rowLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListQueuedJobsRow{}
+	for rows.Next() {
+		var i ListQueuedJobsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Number,
+			&i.WorkloadID,
+			&i.State,
+			&i.AssignedWorkerID,
+			&i.ScheduledAt,
+			&i.CancelRequestedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.Priority,
+			&i.CpuMillis,
+			&i.MemoryMB,
+			&i.Image,
+			&i.RepositoryURL,
+			&i.Revision,
+			&i.Command,
 		); err != nil {
 			return nil, err
 		}
@@ -436,7 +520,7 @@ func (q *Queries) ListTransitions(ctx context.Context, jobID uuid.UUID) ([]State
 }
 
 const lockNextAssignedJob = `-- name: LockNextAssignedJob :one
-SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
+SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority FROM jobs
 WHERE assigned_worker_id = $1 AND state = 'SCHEDULED'
 ORDER BY created_at, number
 LIMIT 1
@@ -460,31 +544,54 @@ func (q *Queries) LockNextAssignedJob(ctx context.Context, workerID *uuid.UUID) 
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
 
 const lockQueuedJobs = `-- name: LockQueuedJobs :many
-SELECT id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at FROM jobs
-WHERE state = 'QUEUED'
-  AND (scheduled_at IS NULL OR scheduled_at <= now())
-ORDER BY created_at, number
+SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority, w.cpu_millis, w.memory_mb, w.image
+FROM jobs j
+JOIN workloads w ON w.id = j.workload_id
+WHERE j.state = 'QUEUED'
+  AND (j.scheduled_at IS NULL OR j.scheduled_at <= now())
+ORDER BY j.priority DESC, j.created_at, j.number
 LIMIT $1
-FOR UPDATE SKIP LOCKED
+FOR UPDATE OF j SKIP LOCKED
 `
 
-// LockQueuedJobs returns the oldest placeable QUEUED jobs and locks them for
-// this transaction. SKIP LOCKED passes over rows another transaction holds
-// instead of waiting for them.
-func (q *Queries) LockQueuedJobs(ctx context.Context, rowLimit int32) ([]Job, error) {
+type LockQueuedJobsRow struct {
+	ID                uuid.UUID
+	Number            int64
+	WorkloadID        uuid.UUID
+	State             string
+	AssignedWorkerID  *uuid.UUID
+	ScheduledAt       *time.Time
+	CancelRequestedAt *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	StartedAt         *time.Time
+	FinishedAt        *time.Time
+	Priority          int32
+	CpuMillis         int32
+	MemoryMB          int32
+	Image             string
+}
+
+// LockQueuedJobs returns placeable QUEUED jobs (higher priority first, then
+// oldest) with their resource requests, locking the job rows for this
+// transaction. SKIP LOCKED passes over rows another transaction holds.
+func (q *Queries) LockQueuedJobs(ctx context.Context, rowLimit int32) ([]LockQueuedJobsRow, error) {
 	rows, err := q.db.Query(ctx, lockQueuedJobs, rowLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Job{}
+	items := []LockQueuedJobsRow{}
 	for rows.Next() {
-		var i Job
+		var i LockQueuedJobsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Number,
@@ -497,6 +604,10 @@ func (q *Queries) LockQueuedJobs(ctx context.Context, rowLimit int32) ([]Job, er
 			&i.UpdatedAt,
 			&i.StartedAt,
 			&i.FinishedAt,
+			&i.Priority,
+			&i.CpuMillis,
+			&i.MemoryMB,
+			&i.Image,
 		); err != nil {
 			return nil, err
 		}
@@ -548,7 +659,7 @@ UPDATE jobs
 SET cancel_requested_at = coalesce(cancel_requested_at, now()),
     updated_at          = now()
 WHERE id = $1 AND state IN ('PREPARING', 'EXECUTING', 'VERIFYING')
-RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
+RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority
 `
 
 // RequestJobCancel marks a running job for cancellation. It returns no row if
@@ -569,6 +680,7 @@ func (q *Queries) RequestJobCancel(ctx context.Context, id uuid.UUID) (Job, erro
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }
@@ -588,7 +700,7 @@ SET state              = $1,
     started_at         = CASE WHEN $5::boolean THEN coalesce(started_at, now()) ELSE started_at END,
     finished_at        = CASE WHEN $6::boolean THEN now() ELSE finished_at END
 WHERE id = $7 AND state = $8
-RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at
+RETURNING id, number, workload_id, state, assigned_worker_id, scheduled_at, cancel_requested_at, created_at, updated_at, started_at, finished_at, priority
 `
 
 type TransitionJobParams struct {
@@ -632,6 +744,7 @@ func (q *Queries) TransitionJob(ctx context.Context, arg TransitionJobParams) (J
 		&i.UpdatedAt,
 		&i.StartedAt,
 		&i.FinishedAt,
+		&i.Priority,
 	)
 	return i, err
 }

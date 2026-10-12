@@ -25,6 +25,7 @@ type submitCall struct {
 	spec        workload.Spec
 	key         string
 	scheduledAt *time.Time
+	priority    int32
 }
 
 type fakeJobService struct {
@@ -39,6 +40,8 @@ type fakeJobService struct {
 
 	listParams []job.ListParams
 	listRows   []db.ListJobsRow
+	queueItems []job.QueueItem
+	queueErr   error
 
 	attempts []db.JobAttempt
 	events   []db.JobEvent
@@ -83,14 +86,15 @@ func (f *fakeJobService) OpenArtifact(context.Context, uuid.UUID, uuid.UUID) (db
 	return f.artifact, io.NopCloser(strings.NewReader(f.content)), nil
 }
 
-func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string, scheduledAt *time.Time) (job.Submission, error) {
-	f.submits = append(f.submits, submitCall{spec, key, scheduledAt})
+func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key string, scheduledAt *time.Time, priority int32) (job.Submission, error) {
+	f.submits = append(f.submits, submitCall{spec, key, scheduledAt, priority})
 	if f.submitErr != nil {
 		return job.Submission{}, f.submitErr
 	}
 	raw, _ := json.Marshal(spec)
 	j := f.job
 	j.ScheduledAt = scheduledAt
+	j.Priority = priority
 	return job.Submission{
 		Detail: job.Detail{
 			Job:      j,
@@ -105,6 +109,10 @@ func (f *fakeJobService) Submit(_ context.Context, spec workload.Spec, key strin
 
 func (f *fakeJobService) Stats(context.Context) (job.Stats, error) {
 	return f.stats, nil
+}
+
+func (f *fakeJobService) Queue(context.Context, int32) ([]job.QueueItem, error) {
+	return f.queueItems, f.queueErr
 }
 
 func (f *fakeJobService) Find(_ context.Context, ref job.Ref) (db.Job, error) {
@@ -567,6 +575,52 @@ func TestSubmitPastScheduledAt(t *testing.T) {
 	rec := submit(t, newJobsRouter(&fakeJobService{}), body, nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+}
+
+func TestSubmitPriority(t *testing.T) {
+	jobs := &fakeJobService{}
+	body := `{"repository":"https://github.com/example/app","revision":"main","command":"go test ./...","priority":50}`
+	rec := submit(t, newJobsRouter(jobs), body, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if len(jobs.submits) != 1 || jobs.submits[0].priority != 50 {
+		t.Fatalf("submit = %+v, want priority 50", jobs.submits)
+	}
+}
+
+func TestSubmitBadPriority(t *testing.T) {
+	body := `{"repository":"https://github.com/example/app","revision":"main","command":"go test ./...","priority":101}`
+	rec := submit(t, newJobsRouter(&fakeJobService{}), body, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+}
+
+func TestQueue(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	jobs := &fakeJobService{queueItems: []job.QueueItem{{
+		Job:           db.Job{ID: id, Number: 7, Priority: 10, CreatedAt: time.Now().UTC()},
+		CPUMillis:     1000,
+		MemoryMB:      1024,
+		Image:         "golang:1.27",
+		RepositoryURL: "https://github.com/example/app",
+		Revision:      "main",
+		Command:       "go test ./...",
+	}}}
+	rec := serve(t, newJobsRouter(jobs), http.MethodGet, "/api/v1/queue", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Jobs []queueItemView `json:"jobs"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0].ID != id || body.Jobs[0].Priority != 10 || body.Jobs[0].CPUMillis != 1000 {
+		t.Fatalf("queue = %+v", body.Jobs)
 	}
 }
 

@@ -17,6 +17,9 @@ export interface Worker {
   slots: number;
   cpu_millis: number;
   memory_mb: number;
+  active_jobs: number;
+  reserved_cpu_millis: number;
+  reserved_memory_mb: number;
   cpu_used_percent: number | null;
   memory_used_mb: number | null;
   metadata: WorkerMetadata;
@@ -57,6 +60,7 @@ export interface Job {
   id: string;
   number: number;
   state: JobState;
+  priority: number;
   assigned_worker_id: string | null;
   scheduled_at: string | null;
   cancel_requested_at: string | null;
@@ -64,6 +68,20 @@ export interface Job {
   updated_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface QueueJob {
+  id: string;
+  number: number;
+  priority: number;
+  cpu_millis: number;
+  memory_mb: number;
+  image: string;
+  repository: string;
+  revision: string;
+  command: string;
+  scheduled_at: string | null;
+  created_at: string;
 }
 
 export interface WorkloadSummary {
@@ -176,6 +194,7 @@ export interface WorkloadRequest {
   runtime?: { image?: string; network?: boolean };
   verification?: { command: string };
   scheduled_at?: string;
+  priority?: number;
 }
 
 export class APIError extends Error {
@@ -212,6 +231,11 @@ export async function probe(name: ProbeName): Promise<ProbeResult> {
 
 export async function getStats(): Promise<Stats> {
   return getJSON<Stats>("/v1/stats");
+}
+
+export async function listQueue(limit = 50): Promise<QueueJob[]> {
+  const body = await getJSON<{ jobs: QueueJob[] }>(`/v1/queue?limit=${limit}`);
+  return body.jobs;
 }
 
 export async function listWorkers(): Promise<Worker[]> {

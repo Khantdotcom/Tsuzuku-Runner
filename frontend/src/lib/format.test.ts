@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { durationBetween, formatBytes, shortRepo } from "./format";
+import { durationBetween, formatBytes, reservedPercent, shortRepo } from "./format";
 
 describe("shortRepo", () => {
   it("strips host and .git", () => {
@@ -22,5 +22,14 @@ describe("formatBytes", () => {
   it("picks a readable unit", () => {
     expect(formatBytes(500)).toBe("500 B");
     expect(formatBytes(2048)).toBe("2.0 KB");
+  });
+});
+
+describe("reservedPercent", () => {
+  it("clamps reserved capacity to 0–100", () => {
+    expect(reservedPercent(500, 1000)).toBe(50);
+    expect(reservedPercent(0, 1000)).toBe(0);
+    expect(reservedPercent(2000, 1000)).toBe(100);
+    expect(reservedPercent(10, 0)).toBe(0);
   });
 });

@@ -90,6 +90,7 @@ func NewRouter(cfg Config) http.Handler {
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/workers", s.handleListWorkers)
 		r.Get("/stats", s.handleStats)
+		r.Get("/queue", s.handleQueue)
 
 		r.Post("/workloads", s.handleSubmitWorkload)
 		r.Get("/jobs", s.handleListJobs)

@@ -37,6 +37,7 @@ erDiagram
         bigint number UK
         uuid workload_id FK
         text state
+        int priority
         uuid assigned_worker_id FK
     }
     job_attempts {
@@ -74,6 +75,7 @@ erDiagram
 | 00004     | `failures`            | Classified failures (category plus message and details).                                  |
 | 00004     | `deliveries`          | Outbound results (patch, pull request, ...) with an idempotency key.                      |
 | 00005     | `workers` (columns)   | Host CPU and memory usage from the latest heartbeat; `NULL` until the first heartbeat.    |
+| 00006     | `jobs.priority`       | Placement priority (0–100, higher first); partial index on placeable queued jobs.         |
 
 ## Conventions
 
@@ -117,8 +119,9 @@ State changes go through `TransitionJob`, a compare-and-set update (`WHERE id = 
 | Query                    | Used for                                                                                    |
 | ------------------------ | ------------------------------------------------------------------------------------------- |
 | `TryLockScheduler`       | `pg_try_advisory_xact_lock`: one scheduling round at a time across replicas, released at commit |
-| `ListSchedulableWorkers` | Online workers (database clock) with their count of unfinished jobs                        |
-| `LockQueuedJobs`         | Oldest placeable `QUEUED` jobs, `FOR UPDATE SKIP LOCKED`; served by `jobs_queue_idx`         |
+| `ListSchedulableWorkers` | Online workers with unfinished job counts and reserved CPU/RAM from assigned workloads     |
+| `LockQueuedJobs`         | Placeable `QUEUED` jobs with resources, priority then age, `FOR UPDATE OF jobs SKIP LOCKED` |
+| `ListQueuedJobs`         | Same ordering for the dashboard queue (no lock)                                            |
 | `LockNextAssignedJob`    | A worker's oldest `SCHEDULED` job, `FOR UPDATE SKIP LOCKED`; served by `jobs_assigned_worker_idx` |
 | `NextAttemptNumber`      | The next attempt number for a job; `UNIQUE (job_id, attempt_number)` backs it up            |
 | `AcquireLease`           | Inserts a lease whose `expires_at` is `now() + ttl` from the database clock                |

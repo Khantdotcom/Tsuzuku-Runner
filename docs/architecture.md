@@ -71,6 +71,7 @@ Errors use RFC 9457 problem details (`application/problem+json`).
 | `GET /api/v1/jobs/{id}/attempts`      | none         | Attempts in order                                          |
 | `GET /api/v1/jobs/{id}/events`        | none         | Timeline events after an `after` cursor                    |
 | `GET /api/v1/stats`                   | none         | Dashboard counts: queued, scheduled, running, completed, failed, cancelled |
+| `GET /api/v1/queue`                   | none         | Placeable `QUEUED` jobs with priority, requested CPU/RAM, image, and wait age |
 | `GET /api/v1/jobs/{id}/logs`          | none         | Log chunks after an `after` cursor (data is base64)        |
 | `GET /api/v1/jobs/{id}/events/stream` | none         | SSE timeline; reconnect with `after` or `Last-Event-ID`    |
 | `GET /api/v1/jobs/{id}/logs/stream`   | none         | SSE log chunks; reconnect with `after` or `Last-Event-ID`  |
@@ -101,6 +102,7 @@ Workers authenticate with a shared bearer token (`TSUZUKU_WORKER_TOKEN`), compar
 | `runtime.network`           | no       | `true`         |                                                                |
 | `verification.command`      | no       |                | Run after `command` when given                                 |
 | `scheduled_at`              | no       | now            | RFC 3339 time; must not be more than a few seconds in the past |
+| `priority`                  | no       | `0`            | Integer 0–100; higher values are placed first                  |
 
 Defaults above a configured maximum are lowered to it. Unknown fields and wrong types are rejected with `400`; values that break a rule return `422` with the field named in `detail`. The normalized spec, with every default filled in, is stored as `workloads.spec`.
 
@@ -162,13 +164,13 @@ sequenceDiagram
 **Scheduler.** One loop inside `server` runs a round every `TSUZUKU_SCHEDULER_INTERVAL` (1s by default). Each round is one transaction:
 
 1. Take the advisory lock with `pg_try_advisory_xact_lock`. If another server replica holds it, skip the round. The lock is released at commit, so a crashed replica never leaves it held.
-2. Recover abandoned work under that lock (see below), so freed slots are visible to placement in the same round.
-3. Load online workers (same database-clock rule as `/workers`) and count their unfinished jobs (`SCHEDULED` through `VERIFYING`).
-4. Lock up to 100 of the oldest placeable `QUEUED` jobs (`scheduled_at` empty or past) with `FOR UPDATE SKIP LOCKED`.
-5. Place each job, oldest first, on the worker with the fewest unfinished jobs that still has a free slot; ties go to the earliest-registered worker.
-6. Move each placed job to `SCHEDULED` with its worker, recording a reason such as `placed on worker-01 (0 of 2 slots busy)`.
+2. Recover abandoned work under that lock (see below), so freed capacity is visible to placement in the same round.
+3. Load online workers (same database-clock rule as `/workers`) with unfinished job counts and reserved CPU/RAM from their assigned workloads (`SCHEDULED` through `VERIFYING`).
+4. Lock up to 100 placeable `QUEUED` jobs (`scheduled_at` empty or past) with `FOR UPDATE SKIP LOCKED`, ordered by `priority` (higher first), then age.
+5. Place each job on the worker with the fewest unfinished jobs that still has a free slot and enough remaining CPU and memory; ties go to the earliest-registered worker. Jobs that fit nowhere are skipped so they do not block smaller jobs behind them.
+6. Move each placed job to `SCHEDULED` with its worker, recording a reason such as `placed on worker-01 (0/2 slots, 0/4000mCPU, 0/8192MB reserved)`.
 
-The advisory lock matters even with `SKIP LOCKED`: two rounds running at once would each see the same free slots and lock different jobs, overfilling the worker. Placement counts slots only; CPU- and memory-aware placement comes later.
+The advisory lock matters even with `SKIP LOCKED`: two rounds running at once would each see the same free capacity and lock different jobs, overfilling the worker.
 
 **Claiming.** `POST /api/v1/workers/{id}/claim` locks the worker's oldest `SCHEDULED` job with `FOR UPDATE SKIP LOCKED`, creates the next `job_attempts` row, acquires a lease lasting `TSUZUKU_LEASE_TTL` (30s by default, from the database clock), and moves the job to `PREPARING` in one transaction, so concurrent claims never start the same job twice. It returns the job, the attempt, and the normalized workload spec, or `204 No Content` when nothing is assigned.
 
@@ -300,7 +302,7 @@ sequenceDiagram
 
 ## Dashboard
 
-The dashboard (`frontend/`, Next.js) is the Milestone 2 UI: a home page with job counts and recent jobs, a submit form (including schedule), a job detail view with live logs over SSE, verification and artifacts, and a workers page.
+The dashboard (`frontend/`, Next.js) is the UI for the current milestones: a home page with job counts and recent jobs, a queue page (priority and requested resources), a submit form (schedule and priority), a job detail view with live logs over SSE, verification and artifacts, and a workers page with reserved vs capacity CPU/RAM.
 
 The browser only talks to the dashboard's own origin. A route handler at `/api/[...path]` forwards an allowlisted set of `GET` and `POST` paths (`/api/healthz`, `/api/readyz`, `/api/openapi.yaml`, `/api/v1/*`) to the API at `TSUZUKU_API_URL`, read at request time. SSE streams use a longer proxy timeout so they are not cut after a few seconds. As a result:
 
@@ -357,4 +359,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestone 0 (foundation) and Milestone 1 (execution core) are complete. Milestone 2 (frontend MVP) is complete: dashboard stats, submit and schedule, job detail with live SSE logs and evidence, workers page, public OpenAPI, and frontend unit tests in CI.
+Milestone 0 (foundation) through Milestone 3 (leases and recovery) are complete. Milestone 4 (resource-aware scheduler) is complete: placement respects CPU, memory, and slots with job priority and skip-unfit backpressure; `GET /api/v1/queue` and reserved capacity on workers; Queue page and priority on submit.

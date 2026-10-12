@@ -10,6 +10,12 @@ export function formatCores(cpuMillis: number): string {
   return `${Number.isInteger(cores) ? cores : cores.toFixed(1)} ${cores === 1 ? "core" : "cores"}`;
 }
 
+/** Reserved capacity as a 0–100 percentage of total capacity. */
+export function reservedPercent(reserved: number, capacity: number): number {
+  if (capacity <= 0) return 0;
+  return Math.min(100, Math.max(0, (reserved / capacity) * 100));
+}
+
 export function formatAgo(iso: string, now: number): string {
   const seconds = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
   if (seconds < 60) return `${seconds}s ago`;

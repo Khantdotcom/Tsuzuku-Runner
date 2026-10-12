@@ -43,17 +43,20 @@ type WorkerStore interface {
 
 // workerView is the public representation of a worker.
 type workerView struct {
-	ID              uuid.UUID       `json:"id"`
-	Name            string          `json:"name"`
-	Status          string          `json:"status"`
-	Slots           int32           `json:"slots"`
-	CPUMillis       int32           `json:"cpu_millis"`
-	MemoryMB        int32           `json:"memory_mb"`
-	CPUUsedPercent  *float64        `json:"cpu_used_percent"`
-	MemoryUsedMB    *int32          `json:"memory_used_mb"`
-	Metadata        json.RawMessage `json:"metadata"`
-	RegisteredAt    time.Time       `json:"registered_at"`
-	LastHeartbeatAt time.Time       `json:"last_heartbeat_at"`
+	ID                uuid.UUID       `json:"id"`
+	Name              string          `json:"name"`
+	Status            string          `json:"status"`
+	Slots             int32           `json:"slots"`
+	CPUMillis         int32           `json:"cpu_millis"`
+	MemoryMB          int32           `json:"memory_mb"`
+	ActiveJobs        int32           `json:"active_jobs"`
+	ReservedCPUMillis int32           `json:"reserved_cpu_millis"`
+	ReservedMemoryMB  int32           `json:"reserved_memory_mb"`
+	CPUUsedPercent    *float64        `json:"cpu_used_percent"`
+	MemoryUsedMB      *int32          `json:"memory_used_mb"`
+	Metadata          json.RawMessage `json:"metadata"`
+	RegisteredAt      time.Time       `json:"registered_at"`
+	LastHeartbeatAt   time.Time       `json:"last_heartbeat_at"`
 }
 
 func (s *server) handleRegisterWorker(w http.ResponseWriter, r *http.Request) {
@@ -156,17 +159,20 @@ func (s *server) handleListWorkers(w http.ResponseWriter, r *http.Request) {
 			status = workerOnline
 		}
 		views = append(views, workerView{
-			ID:              wk.ID,
-			Name:            wk.Name,
-			Status:          status,
-			Slots:           wk.Slots,
-			CPUMillis:       wk.CpuMillis,
-			MemoryMB:        wk.MemoryMB,
-			CPUUsedPercent:  wk.CpuUsedPercent,
-			MemoryUsedMB:    wk.MemoryUsedMB,
-			Metadata:        wk.Metadata,
-			RegisteredAt:    wk.RegisteredAt,
-			LastHeartbeatAt: wk.LastHeartbeatAt,
+			ID:                wk.ID,
+			Name:              wk.Name,
+			Status:            status,
+			Slots:             wk.Slots,
+			CPUMillis:         wk.CpuMillis,
+			MemoryMB:          wk.MemoryMB,
+			ActiveJobs:        row.ActiveJobs,
+			ReservedCPUMillis: row.ReservedCpuMillis,
+			ReservedMemoryMB:  row.ReservedMemoryMb,
+			CPUUsedPercent:    wk.CpuUsedPercent,
+			MemoryUsedMB:      wk.MemoryUsedMB,
+			Metadata:          wk.Metadata,
+			RegisteredAt:      wk.RegisteredAt,
+			LastHeartbeatAt:   wk.LastHeartbeatAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workers": views})

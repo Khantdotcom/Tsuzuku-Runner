@@ -237,7 +237,11 @@ func NewService(pool *pgxpool.Pool, opts ...Option) *Service {
 // idempotencyKey, a repeated identical submission returns the original job,
 // and a different submission under the same key returns ErrIdempotencyMismatch.
 // scheduledAt, when set, is when the scheduler may place the job; nil means now.
-func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (Submission, error) {
+// priority orders placement (higher first); values outside 0–100 are rejected.
+func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time, priority int32) (Submission, error) {
+	if priority < 0 || priority > 100 {
+		return Submission{}, fmt.Errorf("priority must be between 0 and 100, got %d", priority)
+	}
 	if idempotencyKey != "" {
 		sub, found, err := s.replay(ctx, spec, idempotencyKey)
 		if err != nil || found {
@@ -245,7 +249,7 @@ func (s *Service) Submit(ctx context.Context, spec workload.Spec, idempotencyKey
 		}
 	}
 
-	detail, err := s.create(ctx, spec, idempotencyKey, scheduledAt)
+	detail, err := s.create(ctx, spec, idempotencyKey, scheduledAt, priority)
 	var pgErr *pgconn.PgError
 	if idempotencyKey != "" && errors.As(err, &pgErr) && pgErr.ConstraintName == idempotencyKeyConstraint {
 		// A concurrent request with the same key committed first.
@@ -269,6 +273,43 @@ type Stats struct {
 	Completed int64 `json:"completed"`
 	Failed    int64 `json:"failed"`
 	Cancelled int64 `json:"cancelled"`
+}
+
+// QueueItem is a placeable QUEUED job with the resources it requests.
+type QueueItem struct {
+	Job           db.Job
+	CPUMillis     int32
+	MemoryMB      int32
+	Image         string
+	RepositoryURL string
+	Revision      string
+	Command       string
+}
+
+// Queue returns placeable QUEUED jobs ordered for the scheduler (priority, then age).
+func (s *Service) Queue(ctx context.Context, limit int32) ([]QueueItem, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.q.ListQueuedJobs(ctx, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list queued jobs: %w", err)
+	}
+	out := make([]QueueItem, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, QueueItem{
+			Job: db.Job{
+				ID: r.ID, Number: r.Number, WorkloadID: r.WorkloadID, State: r.State,
+				AssignedWorkerID: r.AssignedWorkerID, ScheduledAt: r.ScheduledAt,
+				CancelRequestedAt: r.CancelRequestedAt, CreatedAt: r.CreatedAt,
+				UpdatedAt: r.UpdatedAt, StartedAt: r.StartedAt, FinishedAt: r.FinishedAt,
+				Priority: r.Priority,
+			},
+			CPUMillis: r.CpuMillis, MemoryMB: r.MemoryMB, Image: r.Image,
+			RepositoryURL: r.RepositoryURL, Revision: r.Revision, Command: r.Command,
+		})
+	}
+	return out, nil
 }
 
 // Stats returns how many jobs are in each dashboard bucket.
@@ -297,7 +338,7 @@ func (s *Service) Stats(ctx context.Context) (Stats, error) {
 	return out, nil
 }
 
-func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time) (Detail, error) {
+func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey string, scheduledAt *time.Time, priority int32) (Detail, error) {
 	rawSpec, err := json.Marshal(spec)
 	if err != nil {
 		return Detail{}, fmt.Errorf("encode workload spec: %w", err)
@@ -336,13 +377,18 @@ func (s *Service) create(ctx context.Context, spec workload.Spec, idempotencyKey
 		if err != nil {
 			return fmt.Errorf("create workload: %w", err)
 		}
-		d.Job, err = q.CreateJob(ctx, db.CreateJobParams{ID: jobID, WorkloadID: workloadID, ScheduledAt: scheduledAt})
+		d.Job, err = q.CreateJob(ctx, db.CreateJobParams{
+			ID: jobID, WorkloadID: workloadID, ScheduledAt: scheduledAt, Priority: priority,
+		})
 		if err != nil {
 			return fmt.Errorf("create job: %w", err)
 		}
 		reason := "workload submitted"
 		if scheduledAt != nil {
 			reason = "workload submitted, scheduled for " + scheduledAt.UTC().Format(time.RFC3339)
+		}
+		if priority > 0 {
+			reason = fmt.Sprintf("%s (priority %d)", reason, priority)
 		}
 		tr, err := q.RecordTransition(ctx, db.RecordTransitionParams{
 			JobID: jobID, ToState: d.Job.State, Actor: ActorAPI, Reason: reason,

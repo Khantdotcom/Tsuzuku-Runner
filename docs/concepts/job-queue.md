@@ -90,11 +90,13 @@ SELECT pg_try_advisory_xact_lock(32778045701319541);
 
 **In this project.** `TestConcurrentTicksNeverOverfill` runs 8 scheduling rounds at once against a worker with 2 slots and checks that exactly 2 jobs are placed. With the advisory lock removed, it overfills the worker and fails. With the lock restored, it passes. Now we know the test catches the bug it is meant to catch.
 
-## Fair placement
+## Resource-aware placement
 
-The scheduler takes the oldest jobs first (first in, first out) and gives each one to the online worker with the fewest active jobs that still has a free slot. Ties go to the earliest-registered worker, which keeps results predictable and tests repeatable.
+**The problem.** Counting only free slots can put a 4-core job on a worker that has only 2 cores left, or leave a small job waiting forever behind a huge one that never fits.
 
-The placement logic (`scheduler.Place`) is a pure function: lists in, assignments out, with no database access. That makes the interesting decisions easy to unit-test, and keeps the database code to "load, decide, save".
+**The idea.** Treat each unfinished assigned job as a *reservation* of CPU, memory, and a slot against the worker's capacity. Place a job only where all three still fit. Order the queue by **priority** (higher first), then age (FIFO within the same priority). If the next job fits nowhere, **skip** it and try later jobs so one oversized request does not block the line.
+
+**In this project.** `ListSchedulableWorkers` returns capacity and reserved CPU/RAM from `SCHEDULED`–`VERIFYING` jobs. `LockQueuedJobs` returns placeable `QUEUED` rows ordered by `priority DESC, created_at, number`. `scheduler.Place` is a pure function: job requests and candidates in, assignments out. Jobs that fit no worker stay `QUEUED` until a later round (backpressure). See [Architecture: Scheduling and claiming](../architecture.md#scheduling-and-claiming).
 
 ## Leases and recovery
 

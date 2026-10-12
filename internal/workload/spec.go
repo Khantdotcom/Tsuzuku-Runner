@@ -65,7 +65,15 @@ type Request struct {
 	// ScheduledAt, when set, is when the job becomes placeable. It is not part
 	// of the normalized Spec: idempotent replays compare Spec only.
 	ScheduledAt *time.Time `json:"scheduled_at"`
+	// Priority, when set, orders placement (higher first). It is stored on the
+	// job, not in Spec, so idempotent replays ignore it.
+	Priority *int `json:"priority"`
 }
+
+const (
+	minPriority = 0
+	maxPriority = 100
+)
 
 // scheduleSkew is how far in the past a scheduled_at may be, so a client
 // whose clock is slightly behind the server is still accepted.
@@ -82,6 +90,25 @@ func (r Request) ValidateScheduledAt(now time.Time) error {
 		return errors.New("scheduled_at must be in the future")
 	}
 	return nil
+}
+
+// ValidatePriority reports whether r.Priority is usable. A nil value means 0.
+func (r Request) ValidatePriority() error {
+	if r.Priority == nil {
+		return nil
+	}
+	if *r.Priority < minPriority || *r.Priority > maxPriority {
+		return fmt.Errorf("priority must be between %d and %d", minPriority, maxPriority)
+	}
+	return nil
+}
+
+// PriorityOrZero returns the submission priority, defaulting to 0.
+func (r Request) PriorityOrZero() int32 {
+	if r.Priority == nil {
+		return 0
+	}
+	return int32(*r.Priority) //nolint:gosec // bounded by ValidatePriority
 }
 
 // ResourcesRequest is the requested CPU (in cores) and memory.

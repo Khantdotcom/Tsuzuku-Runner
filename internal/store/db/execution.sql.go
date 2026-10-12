@@ -417,7 +417,8 @@ func (q *Queries) InsertLogChunk(ctx context.Context, arg InsertLogChunkParams) 
 
 const listAbandonedScheduledJobs = `-- name: ListAbandonedScheduledJobs :many
 SELECT j.id, j.number, j.workload_id, j.state, j.assigned_worker_id, j.scheduled_at,
-       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at
+       j.cancel_requested_at, j.created_at, j.updated_at, j.started_at, j.finished_at,
+       j.priority
 FROM jobs j
 JOIN workers w ON w.id = j.assigned_worker_id
 WHERE j.state = 'SCHEDULED'
@@ -455,6 +456,7 @@ func (q *Queries) ListAbandonedScheduledJobs(ctx context.Context, arg ListAbando
 			&i.UpdatedAt,
 			&i.StartedAt,
 			&i.FinishedAt,
+			&i.Priority,
 		); err != nil {
 			return nil, err
 		}

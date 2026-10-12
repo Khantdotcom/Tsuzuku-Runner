@@ -77,26 +77,34 @@ func (q *Queries) GetWorkerByName(ctx context.Context, name string) (Worker, err
 }
 
 const listSchedulableWorkers = `-- name: ListSchedulableWorkers :many
-SELECT w.id, w.name, w.slots, count(j.id)::integer AS active_jobs
+SELECT w.id, w.name, w.slots, w.cpu_millis, w.memory_mb,
+       count(j.id)::integer AS active_jobs,
+       coalesce(sum(wl.cpu_millis), 0)::integer AS reserved_cpu_millis,
+       coalesce(sum(wl.memory_mb), 0)::integer AS reserved_memory_mb
 FROM workers w
 LEFT JOIN jobs j
     ON j.assigned_worker_id = w.id
    AND j.state IN ('SCHEDULED', 'PREPARING', 'EXECUTING', 'VERIFYING')
+LEFT JOIN workloads wl ON wl.id = j.workload_id
 WHERE w.last_heartbeat_at >= now() - make_interval(secs => $1::double precision)
 GROUP BY w.id
 ORDER BY w.registered_at, w.id
 `
 
 type ListSchedulableWorkersRow struct {
-	ID         uuid.UUID
-	Name       string
-	Slots      int32
-	ActiveJobs int32
+	ID                uuid.UUID
+	Name              string
+	Slots             int32
+	CpuMillis         int32
+	MemoryMB          int32
+	ActiveJobs        int32
+	ReservedCpuMillis int32
+	ReservedMemoryMb  int32
 }
 
 // ListSchedulableWorkers returns online workers, oldest registration first,
-// with the number of jobs they hold that have not finished. Liveness uses the
-// database clock, the same clock that stamped last_heartbeat_at.
+// with unfinished job counts and reserved CPU/RAM from assigned workloads.
+// Liveness uses the database clock, the same clock that stamped last_heartbeat_at.
 func (q *Queries) ListSchedulableWorkers(ctx context.Context, staleAfterSeconds float64) ([]ListSchedulableWorkersRow, error) {
 	rows, err := q.db.Query(ctx, listSchedulableWorkers, staleAfterSeconds)
 	if err != nil {
@@ -110,7 +118,11 @@ func (q *Queries) ListSchedulableWorkers(ctx context.Context, staleAfterSeconds 
 			&i.ID,
 			&i.Name,
 			&i.Slots,
+			&i.CpuMillis,
+			&i.MemoryMB,
 			&i.ActiveJobs,
+			&i.ReservedCpuMillis,
+			&i.ReservedMemoryMb,
 		); err != nil {
 			return nil, err
 		}
@@ -123,18 +135,34 @@ func (q *Queries) ListSchedulableWorkers(ctx context.Context, staleAfterSeconds 
 }
 
 const listWorkers = `-- name: ListWorkers :many
-SELECT workers.id, workers.name, workers.slots, workers.cpu_millis, workers.memory_mb, workers.metadata, workers.registered_at, workers.last_heartbeat_at, workers.cpu_used_percent, workers.memory_used_mb, now()::timestamptz AS db_now
+SELECT workers.id, workers.name, workers.slots, workers.cpu_millis, workers.memory_mb, workers.metadata, workers.registered_at, workers.last_heartbeat_at, workers.cpu_used_percent, workers.memory_used_mb, now()::timestamptz AS db_now,
+       coalesce(active.active_jobs, 0)::integer AS active_jobs,
+       coalesce(active.reserved_cpu_millis, 0)::integer AS reserved_cpu_millis,
+       coalesce(active.reserved_memory_mb, 0)::integer AS reserved_memory_mb
 FROM workers
-ORDER BY name
+LEFT JOIN LATERAL (
+    SELECT count(j.id)::integer AS active_jobs,
+           coalesce(sum(wl.cpu_millis), 0)::integer AS reserved_cpu_millis,
+           coalesce(sum(wl.memory_mb), 0)::integer AS reserved_memory_mb
+    FROM jobs j
+    JOIN workloads wl ON wl.id = j.workload_id
+    WHERE j.assigned_worker_id = workers.id
+      AND j.state IN ('SCHEDULED', 'PREPARING', 'EXECUTING', 'VERIFYING')
+) active ON true
+ORDER BY workers.name
 `
 
 type ListWorkersRow struct {
-	Worker Worker
-	DBNow  time.Time
+	Worker            Worker
+	DBNow             time.Time
+	ActiveJobs        int32
+	ReservedCpuMillis int32
+	ReservedMemoryMb  int32
 }
 
 // ListWorkers also returns the database clock so liveness is judged against
-// the same clock that stamped last_heartbeat_at.
+// the same clock that stamped last_heartbeat_at, plus reserved capacity from
+// unfinished assigned jobs.
 func (q *Queries) ListWorkers(ctx context.Context) ([]ListWorkersRow, error) {
 	rows, err := q.db.Query(ctx, listWorkers)
 	if err != nil {
@@ -156,6 +184,9 @@ func (q *Queries) ListWorkers(ctx context.Context) ([]ListWorkersRow, error) {
 			&i.Worker.CpuUsedPercent,
 			&i.Worker.MemoryUsedMB,
 			&i.DBNow,
+			&i.ActiveJobs,
+			&i.ReservedCpuMillis,
+			&i.ReservedMemoryMb,
 		); err != nil {
 			return nil, err
 		}
