@@ -181,10 +181,16 @@ const DefaultMaxLogBytes = 10 << 20
 // DefaultLeaseTTL is how long a claimed attempt stays owned without a renewing heartbeat.
 const DefaultLeaseTTL = 30 * time.Second
 
+// Deliverer runs outbound adapters after a job reaches COMPLETED.
+type Deliverer interface {
+	Deliver(ctx context.Context, jobID uuid.UUID)
+}
+
 type Service struct {
 	pool            *pgxpool.Pool
 	q               *db.Queries
 	artifacts       artifact.Store
+	deliverer       Deliverer
 	maxLogBytes     int64
 	leaseTTL        time.Duration
 	maxAttempts     int
@@ -240,6 +246,11 @@ func WithRetryPolicy(maxAttempts int, base, backoffCap time.Duration) Option {
 // WithLogger reports best-effort work, such as storing artifacts, to l.
 func WithLogger(l *slog.Logger) Option {
 	return func(s *Service) { s.logger = l }
+}
+
+// WithDeliverer runs d after a job finishes COMPLETED (best effort, after commit).
+func WithDeliverer(d Deliverer) Option {
+	return func(s *Service) { s.deliverer = d }
 }
 
 // NewService returns a Service backed by pool.

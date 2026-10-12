@@ -63,6 +63,7 @@ type Request struct {
 	Runtime            *RuntimeRequest      `json:"runtime"`
 	Verification       *VerificationRequest `json:"verification"`
 	Executor           *ExecutorRequest     `json:"executor"`
+	Delivery           *DeliveryRequest     `json:"delivery"`
 	// ScheduledAt, when set, is when the job becomes placeable. It is not part
 	// of the normalized Spec: idempotent replays compare Spec only.
 	ScheduledAt *time.Time `json:"scheduled_at"`
@@ -139,6 +140,13 @@ type ExecutorRequest struct {
 	Prompt string `json:"prompt"`
 }
 
+// DeliveryRequest opts into outbound adapters after a successful run.
+type DeliveryRequest struct {
+	// GitHubPR opens a pull request that adds the job's diff.patch when the
+	// server has TSUZUKU_GITHUB_TOKEN configured.
+	GitHubPR bool `json:"github_pr"`
+}
+
 // VerificationRequest is an optional command and/or named checks run after the
 // workload command succeeds.
 type VerificationRequest struct {
@@ -164,6 +172,12 @@ type Spec struct {
 	Runtime            Runtime       `json:"runtime"`
 	Verification       *Verification `json:"verification,omitempty"`
 	Executor           Executor      `json:"executor"`
+	Delivery           Delivery      `json:"delivery"`
+}
+
+// Delivery names optional outbound adapters after COMPLETED.
+type Delivery struct {
+	GitHubPR bool `json:"github_pr,omitempty"`
 }
 
 // Executor names how the worker runs the main step (command shell vs AI CLI).
@@ -364,6 +378,10 @@ func (r Request) Normalize(limits Limits) (Spec, error) {
 			return Spec{}, fmt.Errorf("executor.prompt must be at most %d characters", maxCommandLen)
 		}
 		spec.Executor = Executor{Kind: kind, Prompt: prompt}
+	}
+
+	if d := r.Delivery; d != nil {
+		spec.Delivery = Delivery{GitHubPR: d.GitHubPR}
 	}
 
 	return spec, nil

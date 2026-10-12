@@ -84,6 +84,10 @@ type Server struct {
 	ArtifactDir string `env:"TSUZUKU_ARTIFACT_DIR" envDefault:"./data/artifacts"`
 	// MaxLogBytes is how much output one attempt may store; the rest is dropped.
 	MaxLogBytes int64 `env:"TSUZUKU_MAX_LOG_BYTES" envDefault:"10485760"`
+	// GitHubToken enables GITHUB_PR delivery when workloads set delivery.github_pr.
+	GitHubToken string `env:"TSUZUKU_GITHUB_TOKEN"`
+	// GitHubAPIBase overrides the GitHub API root (tests / GHES).
+	GitHubAPIBase string `env:"TSUZUKU_GITHUB_API_BASE" envDefault:"https://api.github.com"`
 }
 
 // minLogBytes keeps the log limit above a single upload batch.

@@ -194,8 +194,20 @@ export interface WorkloadRequest {
   runtime?: { image?: string; network?: boolean };
   verification?: { command: string };
   executor?: { kind?: string; prompt?: string };
+  delivery?: { github_pr?: boolean };
   scheduled_at?: string;
   priority?: number;
+}
+
+export interface Delivery {
+  id: string;
+  kind: string;
+  status: string;
+  idempotency_key: string;
+  target: string;
+  external_ref: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class APIError extends Error {
@@ -270,6 +282,26 @@ export async function listAttempts(id: string): Promise<Attempt[]> {
 
 export async function getEvidence(id: string): Promise<Evidence> {
   return getJSON<Evidence>(`/v1/jobs/${encodeURIComponent(id)}/evidence`);
+}
+
+export async function listDeliveries(id: string): Promise<Delivery[]> {
+  const body = await getJSON<{ deliveries: Delivery[] }>(
+    `/v1/jobs/${encodeURIComponent(id)}/deliveries`,
+  );
+  return body.deliveries;
+}
+
+export async function retryDeliveries(id: string): Promise<Delivery[]> {
+  const res = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/deliveries`, {
+    method: "POST",
+    headers: { accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new APIError(res.status, await problemDetail(res));
+  }
+  const body = (await res.json()) as { deliveries: Delivery[] };
+  return body.deliveries;
 }
 
 export async function submitWorkload(

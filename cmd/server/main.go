@@ -14,6 +14,7 @@ import (
 	"github.com/Khantdotcom/tsuzuku-runner/internal/api"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/artifact"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/config"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/delivery"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/job"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/logging"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/metrics"
@@ -52,12 +53,18 @@ func run() error {
 	}
 	defer func() { _ = artifacts.Close() }()
 
+	deliveries := delivery.New(pool, artifacts, delivery.Options{
+		GitHubToken:   cfg.GitHubToken,
+		GitHubAPIBase: cfg.GitHubAPIBase,
+		Logger:        logger,
+	})
 	jobs := job.NewService(pool,
 		job.WithArtifacts(artifacts),
 		job.WithMaxLogBytes(cfg.MaxLogBytes),
 		job.WithLeaseTTL(cfg.LeaseTTL),
 		job.WithRetryPolicy(cfg.JobMaxAttempts, cfg.RetryBackoffBase, cfg.RetryBackoffCap),
 		job.WithLogger(logger),
+		job.WithDeliverer(deliveries),
 	)
 	assignments := scheduler.NewNotifier()
 	stopping := make(chan struct{})
@@ -70,6 +77,7 @@ func run() error {
 		Jobs:             jobs,
 		Claimer:          jobs,
 		Attempts:         jobs,
+		Deliveries:       deliveries,
 		Assignments:      assignments,
 		Stopping:         stopping,
 		WorkerToken:      cfg.Token,

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	_ "embed"
 	"log/slog"
 	"net/http"
@@ -9,23 +10,32 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 
 	"github.com/Khantdotcom/tsuzuku-runner/internal/observability/metrics"
+	"github.com/Khantdotcom/tsuzuku-runner/internal/store/db"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workerapi"
 	"github.com/Khantdotcom/tsuzuku-runner/internal/workload"
 )
+
+// DeliveryService lists and retries outbound deliveries. *delivery.Service implements it.
+type DeliveryService interface {
+	List(ctx context.Context, jobID uuid.UUID) ([]db.Delivery, error)
+	Retry(ctx context.Context, jobID uuid.UUID) ([]db.Delivery, error)
+}
 
 //go:embed openapi.yaml
 var openAPISpec []byte
 
 // Config holds the API's dependencies and settings.
 type Config struct {
-	Logger   *slog.Logger
-	DB       Pinger
-	Workers  WorkerStore
-	Jobs     JobService
-	Claimer  Claimer
-	Attempts AttemptReporter
+	Logger     *slog.Logger
+	DB         Pinger
+	Workers    WorkerStore
+	Jobs       JobService
+	Claimer    Claimer
+	Attempts   AttemptReporter
+	Deliveries DeliveryService
 	// Assignments, if set, wakes waiting claims as soon as jobs are scheduled.
 	Assignments AssignmentSignal
 	// Stopping, if set, is closed when the server starts shutting down, so
@@ -50,6 +60,7 @@ type server struct {
 	jobs             JobService
 	claimer          Claimer
 	attempts         AttemptReporter
+	deliveries       DeliveryService
 	assignments      AssignmentSignal
 	stopping         <-chan struct{}
 	workerStaleAfter time.Duration
@@ -67,6 +78,7 @@ func NewRouter(cfg Config) http.Handler {
 		jobs:             cfg.Jobs,
 		claimer:          cfg.Claimer,
 		attempts:         cfg.Attempts,
+		deliveries:       cfg.Deliveries,
 		assignments:      cfg.Assignments,
 		stopping:         cfg.Stopping,
 		workerStaleAfter: cfg.WorkerStaleAfter,
@@ -114,6 +126,8 @@ func NewRouter(cfg Config) http.Handler {
 		r.Get("/jobs/{id}/evidence/bundle", s.handleDownloadEvidenceBundle)
 		r.Get("/jobs/{id}/artifacts", s.handleListArtifacts)
 		r.Get("/jobs/{id}/artifacts/{artifactID}", s.handleDownloadArtifact)
+		r.Get("/jobs/{id}/deliveries", s.handleListDeliveries)
+		r.Post("/jobs/{id}/deliveries", s.handleRetryDeliveries)
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireWorkerToken(cfg.WorkerToken))

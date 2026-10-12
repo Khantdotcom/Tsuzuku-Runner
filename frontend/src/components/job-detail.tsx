@@ -14,12 +14,21 @@ import {
   isCancellableState,
   isTerminalState,
   listAttempts,
+  listDeliveries,
+  retryDeliveries,
 } from "@/lib/api";
 import { durationBetween, formatAgo, formatBytes, shortRepo } from "@/lib/format";
 import { openSSE, streamURL } from "@/lib/sse";
 import { cn } from "@/lib/utils";
 
-type Tab = "overview" | "timeline" | "logs" | "verification" | "artifacts" | "failures";
+type Tab =
+  | "overview"
+  | "timeline"
+  | "logs"
+  | "verification"
+  | "artifacts"
+  | "deliveries"
+  | "failures";
 
 const tabs: Tab[] = [
   "overview",
@@ -27,6 +36,7 @@ const tabs: Tab[] = [
   "logs",
   "verification",
   "artifacts",
+  "deliveries",
   "failures",
 ];
 
@@ -77,11 +87,22 @@ export function JobDetailView({ id }: { id: string }) {
     queryFn: () => getEvidence(id),
     enabled: !!job.data,
   });
+  const deliveries = useQuery({
+    queryKey: ["deliveries", id],
+    queryFn: () => listDeliveries(id),
+    enabled: !!job.data && isTerminalState(job.data.state),
+  });
 
   const cancel = useMutation({
     mutationFn: () => cancelJob(id),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["job", id] });
+    },
+  });
+  const retryDelivery = useMutation({
+    mutationFn: () => retryDeliveries(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["deliveries", id] });
     },
   });
 
@@ -294,6 +315,67 @@ export function JobDetailView({ id }: { id: string }) {
                 <a href={a.url} className="text-primary hover:underline">
                   Download
                 </a>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      {tab === "deliveries" && (
+        <Card title="Deliveries">
+          {j.state === "COMPLETED" && (
+            <div className="mb-3">
+              <button
+                type="button"
+                disabled={retryDelivery.isPending}
+                onClick={() => retryDelivery.mutate()}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-60"
+              >
+                {retryDelivery.isPending ? "Retrying…" : "Retry deliveries"}
+              </button>
+              {retryDelivery.isError && (
+                <p className="mt-2 text-sm text-destructive">
+                  {retryDelivery.error instanceof APIError
+                    ? retryDelivery.error.message
+                    : "Retry failed"}
+                </p>
+              )}
+            </div>
+          )}
+          {(deliveries.data ?? []).length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No deliveries yet. PATCH appears when a diff.patch artifact exists; GitHub PR
+              requires delivery.github_pr and TSUZUKU_GITHUB_TOKEN.
+            </p>
+          )}
+          <ul className="divide-y divide-border/60">
+            {(deliveries.data ?? []).map((d) => (
+              <li key={d.id} className="space-y-1 py-2 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">
+                    {d.kind} · {d.status}
+                  </span>
+                  {d.external_ref?.startsWith("http") ? (
+                    <a
+                      href={d.external_ref}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline"
+                    >
+                      Open
+                    </a>
+                  ) : d.external_ref?.startsWith("/api/") ? (
+                    <a href={d.external_ref} className="text-primary hover:underline">
+                      Download
+                    </a>
+                  ) : null}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  {d.target || "—"}
+                  {d.external_ref && !d.external_ref.startsWith("http") && !d.external_ref.startsWith("/api/")
+                    ? ` · ${d.external_ref}`
+                    : ""}
+                </div>
               </li>
             ))}
           </ul>

@@ -178,7 +178,7 @@ const MaxVerifications = 6
 const MaxIntegrityFindings = 32
 
 // MaxIntegrityDiffBytes caps the diff text stored on an integrity report.
-const MaxIntegrityDiffBytes = 32 << 10
+const MaxIntegrityDiffBytes = 256 << 10
 
 // VerificationResult is how one verification command ended.
 type VerificationResult struct {

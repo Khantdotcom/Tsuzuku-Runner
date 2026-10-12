@@ -227,6 +227,25 @@ paths:
           description: File bytes
         "404":
           description: Unknown artifact
+  /api/v1/jobs/{id}/deliveries:
+    get:
+      summary: List outbound deliveries
+      operationId: listDeliveries
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: PATCH and GITHUB_PR delivery rows
+    post:
+      summary: Retry deliveries for a COMPLETED job
+      operationId: retryDeliveries
+      parameters:
+        - $ref: "#/components/parameters/JobID"
+      responses:
+        "200":
+          description: Deliveries after an idempotent retry
+        "409":
+          description: Job is not COMPLETED
 components:
   parameters:
     JobID:

@@ -381,4 +381,4 @@ Third-party actions are pinned to commit SHAs. `task ci` runs the same checks lo
 
 ## Status
 
-Milestones 0–9 for the MVP demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, and an AI executor seam (`executor.kind` + CLI template) that still goes through independent verification.
+Milestones 0–9 for the MVP demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, and an AI executor seam (`executor.kind` + CLI template) that still goes through independent verification. Milestone 10 (v0.9) adds idempotent outbound delivery: a `PATCH` row when `diff.patch` exists, and an optional `GITHUB_PR` (`delivery.github_pr` + `TSUZUKU_GITHUB_TOKEN`) that commits the patch file and opens or reuses a pull request.

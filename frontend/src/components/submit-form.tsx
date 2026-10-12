@@ -52,6 +52,9 @@ export function SubmitForm() {
         prompt: executorPrompt || undefined,
       };
     }
+    if (fd.get("github_pr") === "on") {
+      body.delivery = { github_pr: true };
+    }
     if (mode === "schedule") {
       const when = String(fd.get("scheduled_at") ?? "");
       if (!when) {
@@ -125,6 +128,10 @@ export function SubmitForm() {
           as="textarea"
           placeholder="Optional override when executor is AI"
         />
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" name="github_pr" className="size-4 rounded border" />
+          Open a GitHub PR with the patch after COMPLETED (needs server token)
+        </label>
       </fieldset>
 
       <fieldset className="space-y-4 rounded-xl border border-border/80 p-4">

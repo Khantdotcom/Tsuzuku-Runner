@@ -15,5 +15,6 @@ These notes explain *why things work the way they do*. For *what the system does
 | [Live updates and scheduled work](streaming.md) | Server-sent events, reconnect cursors, scheduled placement, dashboard stats |
 | [Observability](observability.md) | Prometheus metrics, queue gauges, Compose `obs` profile |
 | [Executors versus verifiers](executors.md) | Command vs AI executor seam, independent verification |
+| [Outbound delivery](delivery.md) | Idempotent PATCH and GitHub PR adapters after COMPLETED |
 
 Read them in the order above; later notes build on earlier ones.

@@ -186,8 +186,21 @@ func (s *Service) Finish(ctx context.Context, workerID, attemptID uuid.UUID, req
 			s.storeDiffArtifact(ctx, ended, req.Integrity.Diff)
 		}
 		s.archiveEvidence(ctx, ended)
+		s.maybeDeliver(ctx, ended.JobID)
 	}
 	return err
+}
+
+// maybeDeliver runs outbound adapters after a successful COMPLETED finish.
+func (s *Service) maybeDeliver(ctx context.Context, jobID uuid.UUID) {
+	if s.deliverer == nil {
+		return
+	}
+	j, err := s.q.GetJob(ctx, jobID)
+	if err != nil || j.State != string(Completed) {
+		return
+	}
+	s.deliverer.Deliver(ctx, jobID)
 }
 
 func cancelledOnRequest() outcome {

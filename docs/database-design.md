@@ -168,8 +168,12 @@ The `verifying` and `finish` reports read `jobs.cancel_requested_at` under that 
 | `ListVerificationRuns`   | A job's verification runs                                      |
 | `ListVerificationChecks` | The checks of all of a job's runs, grouped by run in Go         |
 | `ListFailures`           | A job's classified failures                                    |
+| `InsertDelivery`         | Create a PENDING delivery; conflict on `idempotency_key` is a no-op |
+| `GetDeliveryByKey`       | Look up an existing delivery for idempotent retries            |
+| `ClaimDelivery` / `CompleteDelivery` / `FailDelivery` | CAS status for one outbound attempt |
+| `ListDeliveriesByJob`    | Job detail and `GET …/deliveries`                              |
 
-Matching an artifact on its job as well as its ID means a URL cannot read another job's files by swapping the artifact ID.
+Matching an artifact on its job as well as its ID means a URL cannot read another job's files by swapping the artifact ID. Delivery rows use a unique `idempotency_key` (`job:<uuid>:PATCH` / `job:<uuid>:GITHUB_PR`) so retries do not open a second pull request.
 
 ## Local development
 
