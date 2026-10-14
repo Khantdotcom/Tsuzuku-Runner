@@ -1,4 +1,6 @@
 # Tsuzuku Runner 🏃‍♂️
+<img width="2079" height="756" alt="image" src="https://github.com/user-attachments/assets/0d06f8db-5042-476d-8378-0bbab9dd5c3e" />
+
 
 [![CI](https://github.com/Khantdotcom/Tsuzuku-Runner/actions/workflows/ci.yml/badge.svg)](https://github.com/Khantdotcom/Tsuzuku-Runner/actions/workflows/ci.yml)
 
