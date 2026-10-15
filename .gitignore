@@ -45,6 +45,8 @@ go.work.sum
 # plan files
 final-produt-requirements.md
 roadmap.md
+zero-cost-portfolio-plan.md
+product-plan.md
 
 # Cursor / agent configuration and context
 .cursor/
