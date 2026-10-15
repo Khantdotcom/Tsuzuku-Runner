@@ -394,3 +394,18 @@ Compose runs two workers (`worker-01`, `worker-02`). The flagship recovery path:
 ## Status
 
 Milestones 0–10 and the v1.0 demo path are in place: retries, multi-check verification, evidence bundles, Prometheus `/metrics` with Compose `--profile obs`, an AI executor seam, idempotent `PATCH` / `GITHUB_PR` delivery, and multi-worker lease recovery (`task demo:recovery`). The Next.js dashboard deploys to Vercel with the Go API hosted separately.
+
+### Known limitations
+
+- **No user authentication.** Only workers authenticate (`TSUZUKU_WORKER_TOKEN`). Submitting, cancelling, and retrying deliveries are open to anyone who can reach the API, and `/metrics` is served on the same port. Do not expose the API publicly.
+- **Network on by default.** `runtime.network` defaults to `true`. Containers on the bridge network can reach anything the host can, including cloud metadata endpoints; nothing blocks them yet.
+- **Shared hosts overcount capacity.** Each worker reports the whole host's CPU and memory, so two workers on one machine advertise twice its capacity and the scheduler can overcommit it.
+- **Public repositories only.** Checkout has no credentials; repositories must be public HTTPS URLs. Images are limited to official `golang`, `node`, and `python`.
+- **`BLOCKED` is final.** There is no resume or modify yet; a blocked job must be resubmitted. `REPAIRING` is defined in the state machine but has no transitions.
+- **Retries start fresh.** A new attempt does not receive the previous attempt's failure context.
+- **No disk limit on workspaces** and no retention: artifacts and log chunks are kept until deleted by hand.
+- **Dashboard staleness.** The job page stops polling attempts and evidence when the job becomes terminal, so the Verification tab can miss results recorded in the last moments until the page is reloaded.
+
+### Next
+
+Authentication with roles and projects, encrypted secrets, quotas and backpressure, an audit log, and a default-off network policy come first. A documented single-VM production deployment with backups, retention, alerting, and tracing follows. After that come intake integrations (CLI, repository webhooks, schedules, notifications), human escalation for blocked jobs, deeper verification, and automated failure-injection and load tests.

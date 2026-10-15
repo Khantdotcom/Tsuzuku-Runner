@@ -24,9 +24,9 @@ Backend: Go (modular monolith)
 
 State: PostgreSQL (transactional transitions, strict idempotency)
 
-Compute: Docker / Linux VMs
+Compute: Docker (Linux VM and Kubernetes runtimes planned)
 
-Observability: OpenTelemetry, Prometheus, Grafana
+Observability: Prometheus, Grafana, structured logs (OpenTelemetry tracing planned)
 
 ## Development
 
@@ -43,7 +43,7 @@ This starts PostgreSQL, applies migrations, then runs the API server, two worker
 - Dashboard: <http://localhost:3000> (submit jobs, watch live logs, inspect evidence)
 - API: <http://localhost:8080> (`/healthz`, `/readyz`, `/openapi.yaml`, `/api/v1/stats`, `/api/v1/jobs`)
 
-Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container, then runs the verification command in the same workspace. The job ends `COMPLETED` only when both exit `0`, and `FAILED` otherwise:
+Submit a workload. It is stored as a `QUEUED` job; within about a second the scheduler places it on a worker, which checks out the repository and runs the command in an isolated container, then runs the verification checks in the same workspace. The job ends `COMPLETED` only when the command exits `0` and every check passes. Otherwise the failure is classified: infrastructure, network, timeout, resource, and environment failures are retried with backoff (up to `TSUZUKU_JOB_MAX_ATTEMPTS`), unmet requirements (such as an acceptance criterion missing from the verification output) end `BLOCKED`, and the rest end `FAILED`:
 
 ```bash
 curl -i http://localhost:8080/api/v1/workloads \
@@ -72,7 +72,9 @@ Stop a worker with `docker compose stop worker-02` and the dashboard shows it `o
 
 ### Dashboard on Vercel
 
-The Next.js UI in `frontend/` can deploy to **Vercel Hobby**. Set the project root to `frontend` and `TSUZUKU_API_URL` to a publicly reachable Go API. Workers and Postgres stay off Vercel (use Compose or another host). See [frontend/README.md](frontend/README.md).
+The Next.js UI in `frontend/` can deploy to **Vercel Hobby**. Set the project root to `frontend` and `TSUZUKU_API_URL` to a reachable Go API. Workers and Postgres stay off Vercel (use Compose or another host). See [frontend/README.md](frontend/README.md).
+
+> **Security:** the API does not authenticate users yet; only workers use a token. Anyone who can reach it can submit and cancel jobs. Keep it on a private network until authentication lands. See [Known limitations](docs/architecture.md#known-limitations).
 
 ### Prerequisites for host development
 

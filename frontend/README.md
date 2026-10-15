@@ -39,6 +39,12 @@ must run elsewhere (local Compose, a VM, etc.) and expose a **public HTTPS** API
    (for example `https://api.example.com`, no trailing slash).
 3. Deploy. The install/build commands are in [`vercel.json`](vercel.json).
 
+> **Security:** the API has no user authentication yet. Anyone who can reach it
+> can submit jobs (which run commands in containers with network access by
+> default) and cancel them. Do not expose it to the internet until
+> authentication lands; keep it on a private network or behind an
+> authenticating proxy.
+
 The API proxy uses short timeouts suitable for Hobby. Live logs poll
 `GET /api/v1/jobs/{id}/logs` about once a second.
 
